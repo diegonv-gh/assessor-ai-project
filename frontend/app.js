@@ -55,7 +55,11 @@ async function encerrarSessaoAtual(id) {
     try {
         const resposta = await fetch(
             `${API_BASE}/sessions/${encodeURIComponent(id)}/encerrar`,
-            { method: "POST" }
+            {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ user_id: userId }),
+            }
         );
         if (!resposta.ok) return null;
         const dados = await resposta.json();

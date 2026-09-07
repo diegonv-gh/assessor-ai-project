@@ -17,3 +17,9 @@ class SessionResponse(BaseModel):
     """Resposta das rotas de início e encerramento de sessão."""
     session_id: str
     resumo: str | None = None
+
+
+class SessionUserRequest(BaseModel):
+    """Identidade opcional enviada nas rotas de início/encerramento."""
+
+    user_id: str = Field(default="usuario_teste", examples=["usuario_teste"])

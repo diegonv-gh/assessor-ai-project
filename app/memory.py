@@ -70,7 +70,7 @@ def _gerar_resumo(mensagens: list[dict]) -> str:
     return _limpar_tokens_pii(resumo)
 
 
-def _doc_id_da_sessao(session_id: str) -> str | None:
+def _doc_id_da_sessao(session_id: str, user_id: str | None = None) -> str | None:
     """Encontra a sessão em andamento, inclusive depois de um reload.
 
     Primeiro consulta o cache em memória. Se ele foi perdido, procura no
@@ -78,13 +78,21 @@ def _doc_id_da_sessao(session_id: str) -> str | None:
     """
     doc_id = _sessoes_ativas.get(session_id)
     if doc_id:
-        return doc_id
+        if not user_id:
+            return doc_id
+        doc = col_sessoes.find_one({"_id": doc_id, "user_id": user_id}, {"_id": 1})
+        if doc:
+            return doc_id
+        _sessoes_ativas.pop(session_id, None)
 
+    filtro = {
+        "session_id": session_id,
+        "resumo": {"$in": ["", None]},
+    }
+    if user_id:
+        filtro["user_id"] = user_id
     doc = col_sessoes.find_one(
-        {
-            "session_id": session_id,
-            "resumo": {"$in": ["", None]},
-        },
+        filtro,
         {"_id": 1},
         sort=[("iniciada_em", -1)],
     )
@@ -97,7 +105,7 @@ def _doc_id_da_sessao(session_id: str) -> str | None:
 
 def iniciar_sessao(session_id: str, user_id: str = "usuario_teste") -> None:
     """Garante um documento aberto para ``session_id``."""
-    if _doc_id_da_sessao(session_id):
+    if _doc_id_da_sessao(session_id, user_id=user_id):
         return
 
     doc_id = str(uuid.uuid4())
@@ -124,7 +132,7 @@ def salvar_mensagem(
 ) -> None:
     """Adiciona uma mensagem à sessão aberta, abrindo-a se necessário."""
     iniciar_sessao(session_id, user_id=user_id)
-    doc_id = _doc_id_da_sessao(session_id)
+    doc_id = _doc_id_da_sessao(session_id, user_id=user_id)
     if not doc_id:
         raise RuntimeError("Não foi possível localizar a sessão para salvar a mensagem.")
 
@@ -137,9 +145,16 @@ def salvar_mensagem(
     )
 
 
-def encerrar_sessao(session_id: str) -> str:
+def _data_para_payload(valor) -> str:
+    """Converte datetime do Mongo ou texto legado para o payload do Qdrant."""
+    if hasattr(valor, "isoformat"):
+        return valor.isoformat()
+    return str(valor)
+
+
+def encerrar_sessao(session_id: str, user_id: str | None = None) -> str:
     """Resume e fecha a sessão aberta; retorna vazio se nada houver para fechar."""
-    doc_id = _doc_id_da_sessao(session_id)
+    doc_id = _doc_id_da_sessao(session_id, user_id=user_id)
     if not doc_id:
         return ""
 
@@ -168,7 +183,7 @@ def encerrar_sessao(session_id: str) -> str:
                     "user_id":     user_id,
                     "session_id":  session_id,
                     "resumo":      resumo,
-                    "iniciada_em": doc["iniciada_em"].isoformat(),
+                    "iniciada_em": _data_para_payload(doc["iniciada_em"]),
                 },
             )
         ],
@@ -181,30 +196,41 @@ def encerrar_sessao(session_id: str) -> str:
 
 def recuperar_historico(user_id: str, busca: str = "", limite: int = 3) -> list[dict]:
     if busca:
-        vetor = gerar_embedding(busca)
-        resultados = qdrant.query_points(
-            collection_name=COLLECTION_MEMORIA,
-            query=vetor,
-            query_filter=models.Filter(
-                must=[
-                    models.FieldCondition(
-                        key="user_id",
-                        match=models.MatchValue(value=user_id),
-                    )
-                ]
-            ),
-            limit=limite,
-        )
+        try:
+            vetor = gerar_embedding(busca)
+            resultados = qdrant.query_points(
+                collection_name=COLLECTION_MEMORIA,
+                query=vetor,
+                query_filter=models.Filter(
+                    must=[
+                        models.FieldCondition(
+                            key="user_id",
+                            match=models.MatchValue(value=user_id),
+                        )
+                    ]
+                ),
+                limit=limite,
+            )
+        except Exception:
+            # Mongo continua sendo a fonte de verdade. Se o índice semântico
+            # estiver indisponível, a consulta recente ainda funciona.
+            resultados = None
 
-        if resultados.points:
-            return [
-                {
-                    "doc_id":      ponto.id,
-                    "iniciada_em": ponto.payload.get("iniciada_em", ""),
-                    "resumo":      ponto.payload["resumo"],
-                }
-                for ponto in resultados.points
-            ]
+        if resultados and resultados.points:
+            encontrados = []
+            for ponto in resultados.points:
+                payload = ponto.payload or {}
+                resumo = payload.get("resumo")
+                if resumo:
+                    encontrados.append(
+                        {
+                            "doc_id": ponto.id,
+                            "iniciada_em": payload.get("iniciada_em", ""),
+                            "resumo": resumo,
+                        }
+                    )
+            if encontrados:
+                return encontrados
 
     filtro = {"user_id": user_id, "resumo": {"$nin": ["", None]}}
     docs = (

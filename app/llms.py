@@ -18,12 +18,14 @@ llm_groq = ChatGroq( # modelo Groq via Langchain, usado quando o Gemini falha ou
     model=GROQ_API,
     temperature=0.7,
     top_p=0.95,
+    max_tokens=768,
     api_key=GROQ_API_KEY,
 )
 
 llm_rapido = ChatGroq(
     model=GROQ_API,
     temperature=0.0,
+    max_tokens=512,
     api_key=GROQ_API_KEY,
 )
 

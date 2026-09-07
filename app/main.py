@@ -6,8 +6,8 @@ from fastapi.staticfiles import StaticFiles
 
 
 app = FastAPI(
-    title="Acessor AI",
-    description="Acessor financeiro e de agenda com LangChain e LangGraph",
+    title="Assessor AI",
+    description="Assessor financeiro e de agenda com LangChain e LangGraph",
     version="0.1.0",
 )
 
@@ -38,7 +38,7 @@ app.add_middleware(
 if (FRONTEND_DIR / "index.html").exists():
     app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
 else:
-    @app.get("?", tags=["infra"])
+    @app.get("/", tags=["infra"])
     def raiz() -> dict:
         return{
             "mensagem": "API do assessor no ar. o frontend ainda n foi criado"

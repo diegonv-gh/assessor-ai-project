@@ -3,14 +3,14 @@
 from fastapi import APIRouter
 
 from app.memory import encerrar_sessao, iniciar_sessao
-from app.schemas import SessionResponse
+from app.schemas import SessionResponse, SessionUserRequest
 
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
 
 @router.post("/{session_id}/iniciar", response_model=SessionResponse)
-def iniciar(session_id: str) -> SessionResponse:
+def iniciar(session_id: str, requisicao: SessionUserRequest | None = None) -> SessionResponse:
     """
     Abre uma sessão explicitamente.
 
@@ -18,12 +18,13 @@ def iniciar(session_id: str) -> SessionResponse:
     mensagem. Existe para o caso de você querer registrar o acesso mesmo que o
     usuário não chegue a perguntar nada.
     """
-    iniciar_sessao(session_id)
+    user_id = requisicao.user_id if requisicao else "usuario_teste"
+    iniciar_sessao(session_id, user_id=user_id)
     return SessionResponse(session_id=session_id, resumo=None)
 
 
 @router.post("/{session_id}/encerrar", response_model=SessionResponse)
-def encerrar(session_id: str) -> SessionResponse:
+def encerrar(session_id: str, requisicao: SessionUserRequest | None = None) -> SessionResponse:
     """
     Encerra a sessão: gera o resumo via LLM e grava no documento.
 
@@ -37,5 +38,6 @@ def encerrar(session_id: str) -> SessionResponse:
     Atenção ao custo: esta rota faz uma chamada de LLM para gerar o resumo.
     Não a acione a cada mensagem — só ao fim da conversa.
     """
-    resumo = encerrar_sessao(session_id)
+    user_id = requisicao.user_id if requisicao else None
+    resumo = encerrar_sessao(session_id, user_id=user_id)
     return SessionResponse(session_id=session_id, resumo=resumo or None)

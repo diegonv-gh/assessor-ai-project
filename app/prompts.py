@@ -42,12 +42,12 @@ ROUTER_PROMPT = f"""
 - Em fora_escopo: ofereça 1–2 sugestões práticas para voltar ao seu escopo.
 - Quando for caso de especialista, emitir somente o encaminhamento e preservar a mensagem ORIGINAL para o especialista; não produzir uma resposta final nesse caso.
 - Se o histórico indicar que o usuário está respondendo a uma clarificação anterior de um especialista, encaminhe para o mesmo domínio da última rota junto ao seu histórico.
-- Perguntas sobre regras, políticas, termos de uso, responsabilidades, restrições, dúvidas gerais sobre o sistema ou o comportamento do Acessor.AI devem ir sempre para o agente faq, NUNCA para fora_escopo ou financeiro/agenda.
+- Perguntas sobre regras, políticas, termos de uso, responsabilidades, restrições, dúvidas gerais sobre o sistema ou o comportamento do Assessor.AI devem ir sempre para o agente faq, NUNCA para fora_escopo ou financeiro/agenda.
 
 ### AGENTES DISPONÍVEIS
 - financeiro : gastos, receitas, dívidas, orçamento, metas, saldo, investimentos.
 - agenda     : compromissos, eventos, lembretes, tarefas, horários, conflitos.
-- faq        : dúvidas sobre o Acessor.AI - regras, políticas, termos, responsabilidades,
+- faq        : dúvidas sobre o Assessor.AI - regras, políticas, termos, responsabilidades,
               restrições, privacidade, segurança e comportamento previsto do sistema.
 
 ### PROTOCOLO DE ENCAMINHAMENTO 
