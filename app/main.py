@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from app.routes import chat, sessions
+from app.routes import chat, perfil, sessions
 from app.config import validar_config, FRONTEND_DIR
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -24,6 +24,7 @@ def health() -> dict:
 
 app.include_router(chat.router)
 app.include_router(sessions.router)
+app.include_router(perfil.router)
 
 app.add_middleware(
     CORSMiddleware,

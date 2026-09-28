@@ -43,6 +43,9 @@ ROUTER_PROMPT = f"""
 - Quando for caso de especialista, emitir somente o encaminhamento e preservar a mensagem ORIGINAL para o especialista; não produzir uma resposta final nesse caso.
 - Se o histórico indicar que o usuário está respondendo a uma clarificação anterior de um especialista, encaminhe para o mesmo domínio da última rota junto ao seu histórico.
 - Perguntas sobre regras, políticas, termos de uso, responsabilidades, restrições, dúvidas gerais sobre o sistema ou o comportamento do Assessor.AI devem ir sempre para o agente faq, NUNCA para fora_escopo ou financeiro/agenda.
+- O perfil cadastrado é uma fonte de contexto do especialista financeiro, não uma
+  sessão anterior. Encaminhe ao financeiro pedidos de orientação pessoal,
+  adequação de risco, investimentos, orçamento, objetivos ou economia.
 
 ### AGENTES DISPONÍVEIS
 - financeiro : gastos, receitas, dívidas, orçamento, metas, saldo, investimentos.
@@ -174,6 +177,35 @@ invente uma conversa passada. Se a tool não encontrar nada e isso impedir a
 resposta, use "esclarecer".
 """
 
+PERFIL_ESPECIALISTA = """
+### PERFIL FINANCEIRO DO USUÁRIO
+Você tem a tool `consultar_perfil(busca=...)`, que consulta o perfil atual do
+usuário. Antes de responder a qualquer pedido de orientação, avaliação ou
+adequação financeira que possa depender de renda, objetivo, tolerância a risco
+ou preferências pessoais, consulte essa tool. Isso inclui planejamento de
+economia, metas, investimentos e ativos de maior risco.
+Consulte-a também quando a pergunta depender do que está cadastrado no perfil
+atual do usuário.
+
+Passe como `busca` a pergunta completa ou o assunto financeiro que precisa
+relacionar às preferências. O `user_id` já vem do contexto da requisição: nunca
+peça esse ID ao usuário e nunca tente preenchê-lo na chamada da tool.
+
+Use o resultado para contextualizar a resposta, mas nunca transforme o perfil
+em autorização para recomendar algo. As regras de segurança e as limitações do
+assistente têm prioridade: uma orientação pode continuar sendo recusada ou
+mantida em nível educacional, mas deve permanecer coerente com o perfil quando
+ele for relevante.
+
+Se não houver perfil, não invente renda, objetivo, risco ou preferências e não
+finja uma avaliação personalizada. Explique que a orientação não pode ser
+personalizada ainda e indique a tela Perfil.
+
+O chat não possui tool para criar ou alterar perfil; pedidos de mudança devem
+ser encaminhados para a tela Perfil e nunca tratados como uma gravação
+concluída.
+"""
+
 FINANCEIRO_PROMPT = f"""
 {PERSONA_SISTEMA}
 
@@ -229,6 +261,8 @@ pertencem ao agente de agenda.
 - Ao registrar uma despesa, envie o valor como número positivo.
 
 {MEMORIA_ESPECIALISTA}
+
+{PERFIL_ESPECIALISTA}
 
 ### SAÍDA (JSON)
 Campos mínimos obrigatórios:

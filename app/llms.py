@@ -4,7 +4,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_groq import ChatGroq
 from app.config import GROQ_API_KEY, GEMINI_API_KEY
 
-GROQ_API = "qwen/qwen3.6-27b"
+GROQ_API = "qwen/qwen3.8-27b"
 
 
 llm_gemini = ChatGoogleGenerativeAI(

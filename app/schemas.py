@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 class ChatRequest(BaseModel):
@@ -11,6 +13,20 @@ class ChatResponse(BaseModel):
     """O que a API devolve no POST /chat"""
     resposta: str
     agentes_chamados: list[str] = Field(default_factory=list)
+
+
+class PerfilRequest(BaseModel):
+    """Contrato enviado pela tela ``frontend/perfil.html``."""
+
+    user_id: str = Field(..., min_length=1, examples=["usuario_teste"])
+    renda_mensal: float = Field(..., gt=0, examples=[4200])
+    objetivo: str = Field(..., min_length=1, max_length=120)
+    tolerancia_risco: Literal["baixa", "media", "alta"]
+    preferencias: str = Field(..., min_length=1)
+
+
+class PerfilResponse(PerfilRequest):
+    """Perfil devolvido depois de ser gravado nos dois índices."""
 
 
 class SessionResponse(BaseModel):

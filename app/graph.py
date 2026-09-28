@@ -22,6 +22,7 @@ from langchain_core.runnables import RunnableConfig
 from app.llms import llm, llm_rapido
 from app.memory import salvar_mensagem
 from app.tools.memoria import TOOLS_MEMORIA
+from app.perfil import TOOLS_PERFIL
 from app.prompts import (
     ROUTER_PROMPT_COMPLETO,
     FINANCEIRO_PROMPT_COMPLETO,
@@ -45,7 +46,7 @@ router_app = create_agent(
 # FINANCEIRO
 financeiro_app = create_agent(
     model=llm,
-    tools=TOOLS + TOOLS_MEMORIA,
+    tools=TOOLS + TOOLS_MEMORIA + TOOLS_PERFIL,
     system_prompt=FINANCEIRO_PROMPT_COMPLETO,
 )
 
@@ -513,8 +514,8 @@ def no_guardrail_entrada(estado: Estado, config: RunnableConfig) -> dict:
 
     configuravel = (config or {}).get("configurable", {})
     session_id = configuravel.get("thread_id")
-    user_id = configuravel.get("user_id") or session_id
-    if session_id:
+    user_id = configuravel.get("user_id")
+    if session_id and user_id:
         # A pergunta só é persistida depois da anonimização.
         salvar_mensagem(
             session_id,
@@ -632,7 +633,7 @@ def executar_fluxo_assessor_detalhado(
         session_id,
         "assistant",
         resposta,
-        user_id=user_id or session_id,
+        user_id=user_id,
     )
 
     return resposta, estado_final.get("agentes_chamados", [])
