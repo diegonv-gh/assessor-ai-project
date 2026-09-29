@@ -2,7 +2,8 @@
 // Configuração
 // ============================================================
 // Ajuste para a URL onde o FastAPI está rodando.
-const API_BASE = "http://localhost:8000";
+const API_BASE =
+    window.location.protocol === "file:" ? "http://localhost:8000" : "";
 const CHAT_ENDPOINT = `${API_BASE}/chat`;
 
 // ============================================================
@@ -21,7 +22,6 @@ const hint = document.getElementById("hint");
 // ============================================================
 // Sessão
 // ============================================================
-const USER_STORAGE_KEY = "assistente_user_id";
 const SESSION_STORAGE_KEY = "assistente_session_id";
 
 function gerarSessionId() {
@@ -40,13 +40,11 @@ function obterOuCriarSessionId() {
     return id;
 }
 
-function obterOuCriarUserId() {
-    let id = localStorage.getItem(USER_STORAGE_KEY);
-    if (!id) {
-        id = gerarSessionId();
-        localStorage.setItem(USER_STORAGE_KEY, id);
-    }
-    return id;
+async function obterUserId() {
+    const resposta = await fetch(`${API_BASE}/identidade`, { credentials: "include" });
+    if (!resposta.ok) throw new Error("Não foi possível obter a identidade do usuário.");
+    const dados = await resposta.json();
+    return dados.user_id;
 }
 
 // Encerra a conversa anterior antes de começar outra. O resumo gerado pelo
@@ -99,9 +97,13 @@ function exibirSessionId(id) {
     sessionIdEl.title = id;
 }
 
-const userId = obterOuCriarUserId();
+let userId = null;
 let sessionId = obterOuCriarSessionId();
 exibirSessionId(sessionId);
+
+obterUserId()
+    .then((id) => { userId = id; })
+    .catch((erro) => { setHint(erro.message, true); });
 
 resetButton.addEventListener("click", iniciarNovaSessao);
 
@@ -204,6 +206,11 @@ inputQuestion.addEventListener("keydown", (evento) => {
 // ============================================================
 composer.addEventListener("submit", async (evento) => {
     evento.preventDefault();
+
+    if (!userId) {
+        setHint("A identidade do usuário ainda não foi carregada.", true);
+        return;
+    }
 
     const question = inputQuestion.value.trim();
     if (!question) return;

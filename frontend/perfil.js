@@ -5,11 +5,6 @@
    e a API não precisa expor rota de leitura.
    ==================================================== */
 
-// Precisa ser o mesmo usuário que o chat usa. Se o backend usar outro
-// identificador quando o front não manda user_id, o assessor não vai
-// encontrar o perfil cadastrado aqui.
-const USER_ID = 'usuario_teste';
-
 // A rota que a sua API precisa expor.
 const ENDPOINT = '/perfil';
 
@@ -28,7 +23,7 @@ const els = {
   echoBody: document.getElementById('echo-body'),
 };
 
-els.badge.textContent = USER_ID;
+let userId = null;
 
 function setStatus(text, kind) {
   els.status.textContent = text;
@@ -41,7 +36,7 @@ function montarPayload() {
   // Campos vazios viram null de propósito: quem decide o que é obrigatório
   // é a API, não esta tela.
   return {
-    user_id: USER_ID,
+    user_id: userId,
     renda_mensal: renda === '' ? null : Number(renda),
     objetivo: els.objetivo.value.trim() || null,
     tolerancia_risco: els.tolerancia.value || null,
@@ -55,6 +50,10 @@ function mostrarResposta(dados) {
 }
 
 async function salvar() {
+  if (!userId) {
+    setStatus('identidade ainda não carregada', 'error');
+    return;
+  }
   const payload = montarPayload();
 
   els.submit.disabled = true;
@@ -92,3 +91,14 @@ async function salvar() {
 }
 
 els.submit.addEventListener('click', salvar);
+
+fetch(API_BASE + '/identidade', { credentials: 'include' })
+  .then((resposta) => {
+    if (!resposta.ok) throw new Error('não foi possível obter a identidade');
+    return resposta.json();
+  })
+  .then((dados) => {
+    userId = dados.user_id;
+    els.badge.textContent = userId;
+  })
+  .catch((erro) => setStatus(erro.message, 'error'));

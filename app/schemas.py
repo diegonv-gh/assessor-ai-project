@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field
 
 class ChatRequest(BaseModel):
     """O que o navegador envia no POST /chat"""
-    user_id: str = Field(default="usuario_teste", examples=["usuario_teste"])
+    user_id: str = Field(..., min_length=1, examples=["uuid-gerado-pelo-backend"])
     session_id: str = Field(..., examples=["id_usuario"])
     pergunta: str = Field(..., min_length=1, examples=["gastei 50 reais no mercado"])
 
@@ -18,7 +18,7 @@ class ChatResponse(BaseModel):
 class PerfilRequest(BaseModel):
     """Contrato enviado pela tela ``frontend/perfil.html``."""
 
-    user_id: str = Field(..., min_length=1, examples=["usuario_teste"])
+    user_id: str = Field(..., min_length=1, examples=["uuid-gerado-pelo-backend"])
     renda_mensal: float = Field(..., gt=0, examples=[4200])
     objetivo: str = Field(..., min_length=1, max_length=120)
     tolerancia_risco: Literal["baixa", "media", "alta"]
@@ -38,4 +38,4 @@ class SessionResponse(BaseModel):
 class SessionUserRequest(BaseModel):
     """Identidade opcional enviada nas rotas de início/encerramento."""
 
-    user_id: str = Field(default="usuario_teste", examples=["usuario_teste"])
+    user_id: str = Field(..., min_length=1, examples=["uuid-gerado-pelo-backend"])
