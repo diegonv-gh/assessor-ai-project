@@ -1,4 +1,4 @@
-"""MCP stdio server exposing the Assessor's existing finance tools."""
+"""MCP stdio server exposing the Assessor's finance and local calendar tools."""
 
 import logging
 import sys
@@ -20,6 +20,7 @@ from app.tools.financeiro import (
     search_transactions as _search_transactions,
     update_transaction as _update_transaction,
 )
+from app.tools.agenda import add_event as _add_event, query_events as _query_events
 
 logger = logging.getLogger("assessor.mcp")
 
@@ -27,9 +28,10 @@ mcp = MCPServer(
     name="assessor-financeiro",
     version="1.0.0",
     instructions=(
-        "Ferramentas financeiras do Assessor. Datas de filtro são locais em "
+        "Ferramentas financeiras e da agenda PostgreSQL do Assessor. Datas de filtro são locais em "
         "America/Sao_Paulo (YYYY-MM-DD); timestamps de transações usam ISO 8601. "
-        "Saldo exclui transferências. Escritas alteram o banco financeiro configurado."
+        "Timestamps de eventos usam ISO 8601 com fuso. Saldo exclui transferências. "
+        "As tools add_event e query_events operam somente na agenda local PostgreSQL."
     ),
 )
 
@@ -171,6 +173,64 @@ def update_transaction(
             "occurred_at": occurred_at,
         }
     )
+
+
+@mcp.tool(
+    name="query_events",
+    title="Consultar agenda local",
+    description=(
+        "Consulta eventos do PostgreSQL por texto e datas locais de America/Sao_Paulo. "
+        "Use date_local para um dia ou date_from_local/date_to_local para um intervalo "
+        "inclusivo. O limite padrão é 20, máximo 200."
+    ),
+    annotations=LEITURA,
+    structured_output=True,
+)
+def query_events(
+    text: Annotated[Optional[str], Field(description="Texto parcial em título, local, notas ou pedido original.")] = None,
+    date_local: Annotated[Optional[str], Field(description="Dia local YYYY-MM-DD.")] = None,
+    date_from_local: Annotated[Optional[str], Field(description="Data inicial local inclusiva YYYY-MM-DD.")] = None,
+    date_to_local: Annotated[Optional[str], Field(description="Data final local inclusiva YYYY-MM-DD.")] = None,
+    limit: Annotated[int, Field(description="Máximo de resultados entre 1 e 200.")] = 20,
+) -> dict[str, Any]:
+    """Consulta os compromissos da agenda PostgreSQL do Assessor."""
+    return _query_events.invoke({
+        "text": text,
+        "date_local": date_local,
+        "date_from_local": date_from_local,
+        "date_to_local": date_to_local,
+        "limit": limit,
+    })
+
+
+@mcp.tool(
+    name="add_event",
+    title="Registrar evento na agenda local",
+    description=(
+        "Registra um evento no PostgreSQL após validar que não há sobreposição. "
+        "Título, texto original e início/fim ISO 8601 com fuso são obrigatórios. "
+        "Esta tool grava na agenda local; não cria no Google Calendar."
+    ),
+    annotations=ESCRITA,
+    structured_output=True,
+)
+def add_event(
+    title: Annotated[str, Field(description="Título do evento.")],
+    source_text: Annotated[str, Field(description="Pedido original do usuário.")],
+    start_time: Annotated[str, Field(description="Início ISO 8601 com offset de fuso horário.")],
+    end_time: Annotated[str, Field(description="Fim ISO 8601 com offset; obrigatório, posterior ao início.")],
+    location: Annotated[Optional[str], Field(description="Local opcional.")] = None,
+    notes: Annotated[Optional[str], Field(description="Observações opcionais.")] = None,
+) -> dict[str, Any]:
+    """Grava o evento local pela tool de domínio da agenda."""
+    return _add_event.invoke({
+        "title": title,
+        "source_text": source_text,
+        "start_time": start_time,
+        "end_time": end_time,
+        "location": location,
+        "notes": notes,
+    })
 
 
 def main() -> None:

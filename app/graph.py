@@ -7,8 +7,11 @@ from typing import Annotated
 from zoneinfo import ZoneInfo
 from langgraph.graph import StateGraph, MessagesState, END
 from langchain.agents import create_agent
+from langchain.agents.middleware import dynamic_prompt, wrap_tool_call
 from langgraph.checkpoint.memory import MemorySaver
 from app.tools.financeiro import TOOLS, add_transaction, saldo_total
+from app.tools.agenda import TOOLS_AGENDA
+from app.tools.calendario_google import TOOLS_GOOGLE
 from app.tools.faq import faq_retriever
 from app.guardrail import (
     anonimizar_entrada,
@@ -17,7 +20,7 @@ from app.guardrail import (
     limpar_raciocinio,
     normalizar_resposta_usuario,
 )
-from langchain_core.messages import RemoveMessage
+from langchain_core.messages import RemoveMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from app.llms import llm, llm_rapido
 from app.memory import salvar_mensagem
@@ -26,9 +29,9 @@ from app.perfil import TOOLS_PERFIL
 from app.prompts import (
     ROUTER_PROMPT_COMPLETO,
     FINANCEIRO_PROMPT_COMPLETO,
-    AGENDA_PROMPT_COMPLETO,
     ORQUESTRADOR_PROMPT_COMPLETO,
     FAQ_PROMPT_COMPLETO,
+    agenda_prompt_atual,
 )
 
 # AGENTES
@@ -50,11 +53,123 @@ financeiro_app = create_agent(
     system_prompt=FINANCEIRO_PROMPT_COMPLETO,
 )
 
+@dynamic_prompt
+def _prompt_agenda_dinamico(request) -> str:
+    """Atualiza a data local do sistema antes de cada chamada ao modelo de agenda."""
+    return agenda_prompt_atual()
+
+
+def _resultados_tool(mensagens, nome_tool: str) -> list[dict]:
+    resultados = []
+    for mensagem in mensagens:
+        tipo = mensagem.get("role") if isinstance(mensagem, dict) else getattr(mensagem, "type", "")
+        nome = mensagem.get("name", "") if isinstance(mensagem, dict) else getattr(mensagem, "name", "")
+        if tipo != "tool" or nome != nome_tool:
+            continue
+        conteudo = mensagem.get("content", "") if isinstance(mensagem, dict) else getattr(mensagem, "content", "")
+        partes = []
+        if isinstance(conteudo, dict):
+            resultados.append(conteudo)
+            continue
+        if isinstance(conteudo, list):
+            partes = [
+                parte.get("text", "") if isinstance(parte, dict) else getattr(parte, "text", "")
+                for parte in conteudo
+            ]
+        elif isinstance(conteudo, str):
+            partes = [conteudo]
+        for parte in partes:
+            if not isinstance(parte, str):
+                continue
+            try:
+                valor = json.loads(parte)
+            except json.JSONDecodeError:
+                try:
+                    valor = ast.literal_eval(parte)
+                except (ValueError, SyntaxError):
+                    continue
+            if isinstance(valor, dict):
+                resultados.append(valor)
+                break
+    return resultados
+
+
+@wrap_tool_call
+def _ordenar_gravacoes_agenda(request, handler):
+    """Só chama Google após sucesso local e nunca repete uma tentativa incerta."""
+    nome = request.tool_call.get("name")
+    if nome != "add_google_event":
+        return handler(request)
+
+    mensagens = request.state.get("messages", [])
+    indice_usuario = _indice_ultima_mensagem_usuario(mensagens)
+    mensagens_turno = mensagens[indice_usuario + 1:] if indice_usuario >= 0 else mensagens
+    locais = _resultados_tool(mensagens_turno, "add_event")
+    evento_local = next(
+        (resultado for resultado in reversed(locais) if resultado.get("status") == "ok" and resultado.get("id") is not None),
+        None,
+    )
+    if evento_local is None:
+        return ToolMessage(
+            name="add_google_event",
+            tool_call_id=request.tool_call["id"],
+            content=json.dumps({
+                "status": "error",
+                "code": "google_requires_local_success",
+                "message": "Aguarde a confirmação do registro local antes de criar o evento Google.",
+            }, ensure_ascii=False),
+        )
+
+    tentativas_google = _resultados_tool(mensagens_turno, "add_google_event")
+    if any(resultado.get("code") != "google_requires_local_success" for resultado in tentativas_google):
+        return ToolMessage(
+            name="add_google_event",
+            tool_call_id=request.tool_call["id"],
+            content=json.dumps({
+                "status": "error",
+                "code": "google_creation_already_attempted",
+                "message": "A criação Google já foi tentada neste turno e não pode ser repetida automaticamente.",
+            }, ensure_ascii=False),
+        )
+
+    argumentos = request.tool_call.get("args", {})
+    titulo_diverge = str(argumentos.get("title") or "").strip() != evento_local.get("title")
+    local_diverge = (argumentos.get("location") or None) != (evento_local.get("location") or None)
+    descricao_diverge = (argumentos.get("description") or None) != (evento_local.get("notes") or None)
+    if titulo_diverge:
+        motivo = "o título enviado ao Google difere do título gravado localmente"
+    else:
+        try:
+            inicio_google = datetime.fromisoformat(argumentos["start_time"].replace("Z", "+00:00"))
+            fim_google = datetime.fromisoformat(argumentos["end_time"].replace("Z", "+00:00"))
+            inicio_local = datetime.fromisoformat(evento_local["start_time"].replace("Z", "+00:00"))
+            fim_local = datetime.fromisoformat(evento_local["end_time"].replace("Z", "+00:00"))
+            horarios_iguais = inicio_google == inicio_local and fim_google == fim_local
+        except (KeyError, TypeError, ValueError):
+            horarios_iguais = False
+        motivo = "os horários enviados ao Google diferem dos horários gravados localmente"
+    if titulo_diverge or local_diverge or descricao_diverge or not horarios_iguais:
+        if local_diverge:
+            motivo = "o local enviado ao Google difere do local gravado localmente"
+        elif descricao_diverge:
+            motivo = "a descrição enviada ao Google difere das observações gravadas localmente"
+        return ToolMessage(
+            name="add_google_event",
+            tool_call_id=request.tool_call["id"],
+            content=json.dumps({
+                "status": "error",
+                "code": "google_event_mismatch",
+                "message": f"Não criei no Google porque {motivo}.",
+            }, ensure_ascii=False),
+        )
+    return handler(request)
+
+
 # AGENDA
 agenda_app = create_agent(
     model=llm,
-    tools=TOOLS_MEMORIA,
-    system_prompt=AGENDA_PROMPT_COMPLETO,
+    tools=TOOLS_AGENDA + TOOLS_GOOGLE + TOOLS_MEMORIA,
+    middleware=[_prompt_agenda_dinamico, _ordenar_gravacoes_agenda],
 )
 
 # ORQUESTRADOR
@@ -284,25 +399,166 @@ def _formatar_resposta_especialista(texto: str) -> str | None:
 
 
 def _ultimo_resultado_tool(mensagens, nome_tool: str) -> dict | None:
-    for mensagem in reversed(mensagens):
+    resultados = _resultados_tool(mensagens, nome_tool)
+    return resultados[-1] if resultados else None
+
+
+def no_agenda(estado: Estado, config: RunnableConfig) -> dict:
+    """Executa agenda e só confirma consultas/escritas verificadas nas tools."""
+    try:
+        saida = agenda_app.invoke({"messages": list(estado["messages"])}, config=config)
+    except Exception:
+        return {
+            "agentes_chamados": ["agenda"],
+            "messages": [{"role": "assistant", "content": json.dumps({
+                "dominio": "agenda",
+                "intencao": "consultar",
+                "resposta": "Não consegui consultar ou alterar a agenda agora.",
+                "recomendacao": "Tente novamente em instantes.",
+            }, ensure_ascii=False)}],
+        }
+
+    mensagens = saida.get("messages", [])
+    indice_usuario = _indice_ultima_mensagem_usuario(mensagens)
+    mensagens_turno = mensagens[indice_usuario + 1:] if indice_usuario >= 0 else mensagens
+    resultados_locais = _resultados_tool(mensagens_turno, "add_event")
+    resultados_google = _resultados_tool(mensagens_turno, "add_google_event")
+    evento_local = next(
+        (item for item in reversed(resultados_locais) if item.get("status") == "ok" and item.get("id") is not None),
+        None,
+    )
+    evento_google = next(
+        (item for item in resultados_google if item.get("status") == "ok" and item.get("id")),
+        None,
+    )
+
+    if evento_local is not None:
+        google_ok = evento_google is not None
+        nome = evento_local.get("title", "o compromisso")
+        if google_ok:
+            resposta = f"Registrei '{nome}' na agenda local e no Google Calendar."
+            recomendacao = ""
+        else:
+            resposta = f"Registrei '{nome}' na agenda local, mas não consegui confirmar a criação no Google Calendar."
+            recomendacao = "Confira o calendário; se o evento não estiver lá, adicione-o manualmente. Não repeti a criação."
+        dados = {
+            "dominio": "agenda",
+            "intencao": "criar",
+            "resposta": resposta,
+            "recomendacao": recomendacao,
+            "escrita": {
+                "operacao": "adicionar",
+                "id": evento_local["id"],
+                "google": "ok" if google_ok else "falhou",
+            },
+        }
+        return {
+            "agentes_chamados": ["agenda"],
+            "messages": [{"role": "assistant", "content": json.dumps(dados, ensure_ascii=False)}],
+        }
+
+    ultimo_local = resultados_locais[-1] if resultados_locais else None
+    if ultimo_local and ultimo_local.get("status") == "error":
+        codigo = ultimo_local.get("code")
+        eventos = ultimo_local.get("events", [])
+        if codigo == "event_conflict":
+            conflito = eventos[0] if eventos else {}
+            titulo = conflito.get("title", "um compromisso existente")
+            horario = conflito.get("start_time", "")
+            if conflito.get("end_time"):
+                horario += f"–{conflito['end_time']}"
+            resposta = f"Não registrei o evento porque o horário se sobrepõe a '{titulo}' {horario}."
+            esclarecer = "Qual outro horário você prefere?"
+        elif codigo == "unknown_existing_duration":
+            resposta = "Não registrei o evento porque há um compromisso sem horário final e não consigo confirmar se existe sobreposição."
+            esclarecer = "Confira o término do compromisso existente ou escolha outro horário."
+        elif codigo == "invalid_datetime":
+            resposta = "Ainda não registrei o compromisso porque preciso de horários válidos com fuso horário."
+            esclarecer = "Informe a data, o horário inicial e o horário final."
+        elif codigo == "invalid_time_range":
+            resposta = "Ainda não registrei o compromisso porque o horário final precisa ser posterior ao inicial."
+            esclarecer = "Qual é o horário final correto?"
+        else:
+            resposta = "Não consegui registrar o compromisso na agenda local; não criei um evento no Google."
+            esclarecer = None
+        dados = {
+            "dominio": "agenda",
+            "intencao": "criar",
+            "resposta": resposta,
+            "recomendacao": "",
+        }
+        if esclarecer:
+            dados["esclarecer"] = esclarecer
+        return {
+            "agentes_chamados": ["agenda"],
+            "messages": [{"role": "assistant", "content": json.dumps(dados, ensure_ascii=False)}],
+        }
+
+    resultado_consulta = _ultimo_resultado_tool(mensagens_turno, "query_events")
+    if resultado_consulta and resultado_consulta.get("status") == "error":
+        dados = {
+            "dominio": "agenda",
+            "intencao": "consultar",
+            "resposta": "Não consegui consultar os compromissos, então não posso confirmar disponibilidade.",
+            "recomendacao": "Tente novamente em instantes.",
+        }
+        return {
+            "agentes_chamados": ["agenda"],
+            "messages": [{"role": "assistant", "content": json.dumps(dados, ensure_ascii=False)}],
+        }
+
+    resposta_modelo = ""
+    dados_modelo = None
+    for mensagem in reversed(mensagens_turno):
         tipo = mensagem.get("role") if isinstance(mensagem, dict) else getattr(mensagem, "type", "")
-        nome = mensagem.get("name", "") if isinstance(mensagem, dict) else getattr(mensagem, "name", "")
-        if tipo != "tool" or (nome and nome != nome_tool):
+        if tipo not in ("ai", "assistant"):
             continue
-        conteudo = mensagem.get("content", "") if isinstance(mensagem, dict) else getattr(mensagem, "content", "")
-        if isinstance(conteudo, dict):
-            return conteudo
-        if isinstance(conteudo, str):
-            try:
-                valor = json.loads(conteudo)
-            except json.JSONDecodeError:
-                try:
-                    valor = ast.literal_eval(conteudo)
-                except (ValueError, SyntaxError):
-                    continue
-            if isinstance(valor, dict):
-                return valor
-    return None
+        candidata = _texto_mensagem(mensagem)
+        if _json_especialista_valido(candidata):
+            resposta_modelo = candidata
+            dados_modelo = _extrair_json_especialista(candidata)
+            break
+
+    if dados_modelo and dados_modelo.get("intencao") == "criar":
+        if dados_modelo.get("esclarecer"):
+            dados_modelo.pop("escrita", None)
+            dados_modelo["resposta"] = "Ainda não registrei o compromisso."
+        elif evento_local is None:
+            dados_modelo = {
+                "dominio": "agenda",
+                "intencao": "criar",
+                "resposta": "Não consegui confirmar a gravação local; nenhum evento foi confirmado.",
+                "recomendacao": "Tente novamente em instantes.",
+            }
+        return {
+            "agentes_chamados": ["agenda"],
+            "messages": [{"role": "assistant", "content": json.dumps(dados_modelo, ensure_ascii=False)}],
+        }
+
+    if resultado_consulta is None and dados_modelo and dados_modelo.get("intencao") in (
+        "consultar", "listar", "disponibilidade", "conflitos"
+    ):
+        dados_modelo = {
+            "dominio": "agenda",
+            "intencao": "consultar",
+            "resposta": "Não consegui confirmar os compromissos atuais porque a consulta da agenda não foi concluída.",
+            "recomendacao": "Tente novamente em instantes.",
+        }
+        return {
+            "agentes_chamados": ["agenda"],
+            "messages": [{"role": "assistant", "content": json.dumps(dados_modelo, ensure_ascii=False)}],
+        }
+    if resposta_modelo:
+        return saida
+    return {
+        "agentes_chamados": ["agenda"],
+        "messages": [{"role": "assistant", "content": json.dumps({
+            "dominio": "agenda",
+            "intencao": "consultar",
+            "resposta": "Não consegui confirmar essa operação da agenda.",
+            "recomendacao": "Tente novamente em instantes.",
+        }, ensure_ascii=False)}],
+    }
 
 
 def no_financeiro(estado: Estado, config: RunnableConfig) -> dict:
@@ -563,7 +819,7 @@ grafo = StateGraph(Estado)
 grafo.add_node("guardrail_entrada", no_guardrail_entrada)
 grafo.add_node("roteador",     no_roteador)
 grafo.add_node("financeiro",   no_financeiro)
-grafo.add_node("agenda",       agenda_app)
+grafo.add_node("agenda",       no_agenda)
 grafo.add_node("faq",          faq_app)
 grafo.add_node("orquestrador", no_orquestrador)
 grafo.add_node("guardrail_saida", no_guardrail_saida)

@@ -8,6 +8,7 @@ O sistema conversa com o usuário, consulta e registra transações financeiras,
 
 - Roteamento entre agentes especializados.
 - Consulta, cadastro, atualização e cálculo de saldo financeiro.
+- Consulta e cadastro de compromissos na agenda local, com sincronização opcional ao Google Calendar.
 - Busca semântica no FAQ em PDF.
 - Histórico de curto prazo por sessão.
 - Resumos de sessões encerradas armazenados no MongoDB e indexados no Qdrant.
@@ -52,22 +53,25 @@ Nunca substitua os placeholders por chaves reais no `README.md` ou em qualquer a
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install fastapi "uvicorn[standard]" pydantic python-dotenv psycopg2-binary pymongo qdrant-client langchain langgraph langchain-google-genai langchain-groq langchain-community langchain-text-splitters pypdf "mcp[cli]==2.2.0"
+pip install fastapi "uvicorn[standard]" pydantic python-dotenv psycopg2-binary pymongo qdrant-client langchain langgraph langchain-google-genai langchain-groq langchain-community langchain-text-splitters pypdf "mcp[cli]==2.2.0" "google-auth-oauthlib==1.5.0" tzdata
 uvicorn app.main:app --reload
 ```
 
-### Servidor MCP financeiro
+### Servidor MCP de finanças e agenda
 
-O servidor MCP expõe as mesmas cinco tools financeiras usadas pelo Assessor: `query_transactions`, `total_balance`, `daily_balance`, `add_transaction` e `update_transaction`. Ele roda como um processo local por `stdio` e usa a `DATABASE_URL` do `.env` da raiz do projeto. Não inicia o grafo nem precisa das configurações de Gemini, Groq, MongoDB ou Qdrant.
+O servidor MCP local expõe sete tools por `stdio`, usando a `DATABASE_URL` do `.env` da raiz do projeto. Ele não inicia o grafo nem depende de Gemini, Groq, MongoDB, Qdrant ou autenticação Google.
+
+- Finanças: `query_transactions`, `total_balance`, `daily_balance`, `add_transaction` e `update_transaction`.
+- Agenda PostgreSQL: `query_events` e `add_event`. `add_event` verifica sobreposição e grava somente no banco local; a sincronização Google ocorre pelo chat do Assessor.
 
 Instale o SDK MCP no mesmo Python configurado no cliente:
 
 ```powershell
-python -m pip install "mcp[cli]==2.2.0"
+python -m pip install "mcp[cli]==2.2.0" "google-auth-oauthlib==1.5.0" tzdata
 python -c "import sys; print(sys.executable)"
 ```
 
-O arquivo `.cursor/mcp.json` já vem configurado para esta máquina. Em outro computador, ajuste `command` para o caminho do executável exibido acima e o caminho em `args` para `app/mcp_server.py` neste projeto. Paths com espaços são aceitos como uma única string JSON. Reinicie ou atualize as integrações MCP do Cursor; o servidor `assessor-financeiro` deve mostrar cinco tools. O banco PostgreSQL configurado em `DATABASE_URL` precisa estar acessível quando uma tool for chamada.
+O arquivo `.cursor/mcp.json` já vem configurado para esta máquina. Em outro computador, ajuste `command` para o executável mostrado acima e `args` para o caminho absoluto de `app/mcp_server.py`. Paths com espaços são aceitos como uma única string JSON. Reinicie ou atualize a integração MCP do Cursor; `assessor-financeiro` deve mostrar as sete tools. O PostgreSQL configurado em `DATABASE_URL` precisa estar acessível quando uma tool for chamada.
 
 Para configurar manualmente no Cline, abra **MCP Servers → Configure MCP Servers** e acrescente este objeto a `mcpServers` no arquivo de configuração do Cline. Atualize os dois caminhos para a sua máquina, como no `.cursor/mcp.json`, salve e habilite o servidor na lista:
 
@@ -82,13 +86,44 @@ Para configurar manualmente no Cline, abra **MCP Servers → Configure MCP Serve
 }
 ```
 
-As tools de consulta são marcadas como somente leitura. Cadastro e atualização são operações de escrita; as anotações MCP ajudam o cliente a decidir quando pedir confirmação, mas a confirmação depende das configurações do próprio cliente. Filtros de data usam dias locais em `America/Sao_Paulo`, no formato `YYYY-MM-DD`; timestamps de transações usam ISO 8601. Os cálculos de saldo excluem transferências.
+As consultas são marcadas como somente leitura; cadastro e atualização são operações de escrita. As anotações ajudam o cliente a decidir quando pedir confirmação, mas a política depende das configurações do cliente. Filtros de agenda e finanças usam dias locais em `America/Sao_Paulo`, no formato `YYYY-MM-DD`; inícios e términos de eventos usam ISO 8601 com fuso. Intervalos de consulta incluem o último dia. Os saldos excluem transferências.
+
+### Google Calendar no chat do Assessor
+
+A integração Google é opcional: sem credenciais ou login, a agenda PostgreSQL continua disponível. O processo de autenticação usa credenciais OAuth do tipo **Desktop app**. O arquivo `gcp-oauth.keys.json` está na raiz desta instalação e é ignorado pelo Git. Em outro clone, coloque na raiz o JSON Desktop fornecido para o projeto Google autorizado (ou ajuste `GOOGLE_OAUTH_CREDENTIALS`); nunca publique esse arquivo ou `google-calendar.token.json`.
+
+O serviço MCP do Google Calendar está em [Developer Preview](https://developers.google.com/workspace/calendar/api/v3/reference/mcp/tools_list/create_event); o formato implementado usa `summary`, início e fim ISO 8601, com local, descrição e fuso opcionais.
+
+O `.env` pode definir estas opções; todas são opcionais:
+
+| Variável | Uso |
+|---|---|
+| `GOOGLE_OAUTH_CREDENTIALS` | Caminho do JSON OAuth Desktop. Caminhos relativos são resolvidos a partir da raiz do projeto; padrão `gcp-oauth.keys.json`. |
+| `GOOGLE_CALENDAR_MCP_URL` | URL do serviço MCP Google Calendar; por padrão `https://calendarmcp.googleapis.com/mcp/v1`. |
+| `GOOGLE_CALENDAR_ACCESS_TOKEN` | Token opcional para automação local; tem precedência sobre o token salvo em arquivo. |
+
+Faça o consentimento inicial explicitamente no terminal da raiz do projeto. O comando abre o navegador para a conta Google desta instalação e salva o token localmente:
+
+```powershell
+python -c "from app.tools.calendario_google import autenticar; print(autenticar())"
+```
+
+O token local é renovado quando expira e há refresh token. Para conferir a lista pública de tools do serviço MCP sem criar eventos:
+
+```powershell
+python -c "from app.tools.calendario_google import listar_tools_google; print(listar_tools_google())"
+```
+
+Na conversa, o Assessor consulta primeiro a agenda, pede os dados ausentes (inclusive duração/fim) e não grava em caso de conflito. Em seguida, grava no PostgreSQL e só após sucesso tenta criar no calendário `primary` da conta autorizada. O chat informa separadamente os resultados locais e Google; se Google falhar, o evento local permanece salvo. Uma falha incerta não dispara nova criação automática. O fallback REST usa o mesmo token somente quando há resposta explícita de que o serviço MCP está desabilitado.
 
 #### Diagnóstico
 
-- **Servidor não aparece ou `ModuleNotFoundError`:** confira `command`, `args` e que o MCP, LangChain e dependências do projeto estão instalados no mesmo Python; depois use **Refresh** ou reinicie a janela do Cursor.
+- **Servidor não aparece ou `ModuleNotFoundError`:** confira `command`, `args` e se MCP, LangChain e dependências do projeto estão instalados no mesmo Python; depois atualize ou reinicie a integração no Cursor.
 - **`DATABASE_URL ausente`:** confirme que o `.env` existe na raiz deste projeto e define `DATABASE_URL`. O processo MCP não imprime credenciais.
 - **Erro de conexão ao chamar uma tool:** verifique se o PostgreSQL está rodando e se a URL e a rede estão corretas.
+- **Agenda Google não autorizada:** instale `google-auth-oauthlib` no Python usado pelo Assessor e execute `autenticar()` no terminal. Se a tela de consentimento bloquear o acesso, confira se a conta está cadastrada como usuário de teste no projeto OAuth do Google.
+- **Google `403` ou API desabilitada:** confira se Google Calendar API/MCP está habilitado no projeto OAuth, se a conta concedeu o escopo de eventos e se o token salvo tem acesso ao calendário principal.
+- **Resultado local salvo, Google falhou:** o evento continua no PostgreSQL. Confira a autorização e o calendário antes de qualquer nova tentativa para evitar duplicatas.
 - **Inspecionar falhas no Cursor:** consulte **View → Output → MCP Logs**. O protocolo MCP usa `stdout`; mensagens de diagnóstico são encaminhadas a `stderr`.
 
 Com o servidor em execução:
