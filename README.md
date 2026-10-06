@@ -52,9 +52,44 @@ Nunca substitua os placeholders por chaves reais no `README.md` ou em qualquer a
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install fastapi "uvicorn[standard]" pydantic python-dotenv psycopg2-binary pymongo qdrant-client langchain langgraph langchain-google-genai langchain-groq langchain-community langchain-text-splitters pypdf
+pip install fastapi "uvicorn[standard]" pydantic python-dotenv psycopg2-binary pymongo qdrant-client langchain langgraph langchain-google-genai langchain-groq langchain-community langchain-text-splitters pypdf "mcp[cli]==2.2.0"
 uvicorn app.main:app --reload
 ```
+
+### Servidor MCP financeiro
+
+O servidor MCP expõe as mesmas cinco tools financeiras usadas pelo Assessor: `query_transactions`, `total_balance`, `daily_balance`, `add_transaction` e `update_transaction`. Ele roda como um processo local por `stdio` e usa a `DATABASE_URL` do `.env` da raiz do projeto. Não inicia o grafo nem precisa das configurações de Gemini, Groq, MongoDB ou Qdrant.
+
+Instale o SDK MCP no mesmo Python configurado no cliente:
+
+```powershell
+python -m pip install "mcp[cli]==2.2.0"
+python -c "import sys; print(sys.executable)"
+```
+
+O arquivo `.cursor/mcp.json` já vem configurado para esta máquina. Em outro computador, ajuste `command` para o caminho do executável exibido acima e o caminho em `args` para `app/mcp_server.py` neste projeto. Paths com espaços são aceitos como uma única string JSON. Reinicie ou atualize as integrações MCP do Cursor; o servidor `assessor-financeiro` deve mostrar cinco tools. O banco PostgreSQL configurado em `DATABASE_URL` precisa estar acessível quando uma tool for chamada.
+
+Para configurar manualmente no Cline, abra **MCP Servers → Configure MCP Servers** e acrescente este objeto a `mcpServers` no arquivo de configuração do Cline. Atualize os dois caminhos para a sua máquina, como no `.cursor/mcp.json`, salve e habilite o servidor na lista:
+
+```json
+{
+  "assessor-financeiro": {
+    "command": "C:\\Program Files\\Python314\\python.exe",
+    "args": [
+      "C:\\Users\\diegovaladares-ieg\\OneDrive\\Tech\\2 ano\\IA2\\IA Assessor\\migracao_fastAPI\\app\\mcp_server.py"
+    ]
+  }
+}
+```
+
+As tools de consulta são marcadas como somente leitura. Cadastro e atualização são operações de escrita; as anotações MCP ajudam o cliente a decidir quando pedir confirmação, mas a confirmação depende das configurações do próprio cliente. Filtros de data usam dias locais em `America/Sao_Paulo`, no formato `YYYY-MM-DD`; timestamps de transações usam ISO 8601. Os cálculos de saldo excluem transferências.
+
+#### Diagnóstico
+
+- **Servidor não aparece ou `ModuleNotFoundError`:** confira `command`, `args` e que o MCP, LangChain e dependências do projeto estão instalados no mesmo Python; depois use **Refresh** ou reinicie a janela do Cursor.
+- **`DATABASE_URL ausente`:** confirme que o `.env` existe na raiz deste projeto e define `DATABASE_URL`. O processo MCP não imprime credenciais.
+- **Erro de conexão ao chamar uma tool:** verifique se o PostgreSQL está rodando e se a URL e a rede estão corretas.
+- **Inspecionar falhas no Cursor:** consulte **View → Output → MCP Logs**. O protocolo MCP usa `stdout`; mensagens de diagnóstico são encaminhadas a `stderr`.
 
 Com o servidor em execução:
 
