@@ -24,21 +24,14 @@ const hint = document.getElementById("hint");
 // ============================================================
 const SESSION_STORAGE_KEY = "assistente_session_id";
 
-function gerarSessionId() {
-    if (window.crypto && crypto.randomUUID) {
-        return crypto.randomUUID();
-    }
-    return "sess-" + Math.random().toString(36).slice(2, 10);
+function exibirSessionId(id) {
+    sessionIdEl.textContent = id.length > 12 ? id.slice(0, 8) + "…" : id;
+    sessionIdEl.title = id;
 }
 
-function obterOuCriarSessionId() {
-    let id = localStorage.getItem(SESSION_STORAGE_KEY);
-    if (!id) {
-        id = gerarSessionId();
-        localStorage.setItem(SESSION_STORAGE_KEY, id);
-    }
-    return id;
-}
+let userId = null;
+let sessionId = localStorage.getItem(SESSION_STORAGE_KEY);
+if (sessionId) exibirSessionId(sessionId);
 
 async function obterUserId() {
     const resposta = await fetch(`${API_BASE}/identidade`, { credentials: "include" });
@@ -47,17 +40,31 @@ async function obterUserId() {
     return dados.user_id;
 }
 
-// Encerra a conversa anterior antes de começar outra. O resumo gerado pelo
-// servidor é o que torna a conversa pesquisável pela memória de longo prazo.
+async function criarSessao() {
+    const resposta = await fetch(`${API_BASE}/sessions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ user_id: userId }),
+    });
+    if (!resposta.ok) {
+        const detalhe = await resposta.text();
+        throw new Error(`Não foi possível iniciar a sessão. ${detalhe}`);
+    }
+    const dados = await resposta.json();
+    sessionId = dados.session_id;
+    localStorage.setItem(SESSION_STORAGE_KEY, sessionId);
+    exibirSessionId(sessionId);
+    return dados;
+}
+
+// O MongoDB gera o resumo e mantém o histórico da sessão entre reinicializações.
 async function encerrarSessaoAtual(id) {
+    if (!id) return null;
     try {
+        const parametros = new URLSearchParams({ user_id: userId });
         const resposta = await fetch(
-            `${API_BASE}/sessions/${encodeURIComponent(id)}/encerrar`,
-            {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ user_id: userId }),
-            }
+            `${API_BASE}/sessions/${encodeURIComponent(id)}?${parametros}`,
+            { method: "DELETE" }
         );
         if (!resposta.ok) return null;
         const dados = await resposta.json();
@@ -69,17 +76,21 @@ async function encerrarSessaoAtual(id) {
 }
 
 async function iniciarNovaSessao() {
-    const anterior = sessionId;
-
+    if (!userId) {
+        setHint("A identidade do usuário ainda não foi carregada.", true);
+        return;
+    }
     resetButton.disabled = true;
     setHint("Encerrando a sessão anterior…");
-    const resumo = await encerrarSessaoAtual(anterior);
+    const resumo = await encerrarSessaoAtual(sessionId);
 
-    const id = gerarSessionId();
-    localStorage.setItem(SESSION_STORAGE_KEY, id);
-    // Atualizar o localStorage não muda a variável usada pelo POST /chat.
-    sessionId = id;
-    exibirSessionId(id);
+    try {
+        await criarSessao();
+    } catch (erro) {
+        setHint(erro.message, true);
+        resetButton.disabled = false;
+        return;
+    }
 
     thread.innerHTML = "";
     thread.appendChild(threadEmpty);
@@ -92,17 +103,14 @@ async function iniciarNovaSessao() {
     resetButton.disabled = false;
 }
 
-function exibirSessionId(id) {
-    sessionIdEl.textContent = id.length > 12 ? id.slice(0, 8) + "…" : id;
-    sessionIdEl.title = id;
-}
-
-let userId = null;
-let sessionId = obterOuCriarSessionId();
-exibirSessionId(sessionId);
-
 obterUserId()
-    .then((id) => { userId = id; })
+    .then(async (id) => {
+        userId = id;
+        if (!sessionId) {
+            await criarSessao();
+            setHint("Nova sessão iniciada.");
+        }
+    })
     .catch((erro) => { setHint(erro.message, true); });
 
 resetButton.addEventListener("click", iniciarNovaSessao);
@@ -209,6 +217,10 @@ composer.addEventListener("submit", async (evento) => {
 
     if (!userId) {
         setHint("A identidade do usuário ainda não foi carregada.", true);
+        return;
+    }
+    if (!sessionId) {
+        setHint("A sessão ainda não foi iniciada pelo servidor.", true);
         return;
     }
 

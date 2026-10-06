@@ -268,7 +268,7 @@ def add_transaction(
     finally:
         _fechar_db(conn, cur)
 
-@tool("search_transactions", args_schema=QueryTransactionsArgs)
+@tool("query_transactions", args_schema=QueryTransactionsArgs)
 def search_transactions(
     query: Optional[str] = None,
     start_date: Optional[str] = None,
@@ -371,7 +371,7 @@ def search_transactions(
     finally:
         _fechar_db(conn, cur)
 
-@tool("saldo_total")
+@tool("total_balance")
 def saldo_total() -> dict:
     """Calcula o saldo total (entradas - despesas) com base nas transações registradas. Ignore o tipo TRANSFER(3)"""
     conn = None
@@ -398,7 +398,7 @@ def saldo_total() -> dict:
     finally:
         _fechar_db(conn, cur)
 
-@tool("saldo_diario")
+@tool("daily_balance")
 def saldo_diario(first_date: str, last_date: Optional[str] = None) -> dict: 
     """Use esta tool SEMPRE que o usuário perguntar sobre saldo, balanço, entradas ou saídas de um dia ou período específico. Exemplos: 'qual meu saldo de hoje?', 'quanto gastei essa semana?', 'meu balanço de 01/03 a 15/03'. Converta datas do formato DD/MM/YYYY para YYYY-MM-DD antes de chamar."""
     inicio = _normalizar_data_local(first_date)

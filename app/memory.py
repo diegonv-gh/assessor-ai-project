@@ -21,10 +21,6 @@ _mongo = MongoClient(MONGODB_URI)
 db = _mongo[MONGODB_DB]
 col_sessoes = db["sessoes"]
 
-# O cache evita uma consulta ao Mongo a cada mensagem, mas não é a fonte de
-# verdade: _doc_id_da_sessao() repovoa o cache depois de um --reload.
-_sessoes_ativas: dict[str, str] = {}
-
 _llm_resumo = llm_rapido
 
 _PROMPT_RESUMO = """\
@@ -71,20 +67,7 @@ def _gerar_resumo(mensagens: list[dict]) -> str:
 
 
 def _doc_id_da_sessao(session_id: str, user_id: str | None = None) -> str | None:
-    """Encontra a sessão em andamento, inclusive depois de um reload.
-
-    Primeiro consulta o cache em memória. Se ele foi perdido, procura no
-    MongoDB a sessão mais recente deste usuário que ainda não possui resumo.
-    """
-    doc_id = _sessoes_ativas.get(session_id)
-    if doc_id:
-        if not user_id:
-            return doc_id
-        doc = col_sessoes.find_one({"_id": doc_id, "user_id": user_id}, {"_id": 1})
-        if doc:
-            return doc_id
-        _sessoes_ativas.pop(session_id, None)
-
+    """Encontra no MongoDB a sessão em andamento para este usuário."""
     filtro = {
         "session_id": session_id,
         "resumo": {"$in": ["", None]},
@@ -99,7 +82,6 @@ def _doc_id_da_sessao(session_id: str, user_id: str | None = None) -> str | None
     if not doc:
         return None
 
-    _sessoes_ativas[session_id] = str(doc["_id"])
     return str(doc["_id"])
 
 
@@ -121,7 +103,6 @@ def iniciar_sessao(session_id: str, user_id: str = "usuario_teste") -> None:
             "mensagens": [],
         }
     )
-    _sessoes_ativas[session_id] = doc_id
 
 
 def salvar_mensagem(
@@ -160,7 +141,6 @@ def encerrar_sessao(session_id: str, user_id: str | None = None) -> str:
 
     doc = col_sessoes.find_one({"_id": doc_id})
     if not doc or not doc.get("mensagens"):
-        _sessoes_ativas.pop(session_id, None)
         return ""
 
     resumo = _gerar_resumo(doc["mensagens"])
@@ -188,8 +168,6 @@ def encerrar_sessao(session_id: str, user_id: str | None = None) -> str:
             )
         ],
     )
-
-    _sessoes_ativas.pop(session_id)
 
     return resumo
 
@@ -250,6 +228,16 @@ def recuperar_mensagens(doc_id: str) -> list[dict]:
     """Recupera as mensagens completas de uma sessão específica."""
     doc = col_sessoes.find_one({"_id": doc_id}, {"mensagens": 1})
     return doc.get("mensagens", []) if doc else []
+
+
+def recuperar_mensagens_sessao(session_id: str, user_id: str) -> list[dict]:
+    """Recupera mensagens pelo identificador público da sessão e pelo usuário."""
+    doc = col_sessoes.find_one(
+        {"session_id": session_id, "user_id": user_id},
+        {"_id": 1},
+        sort=[("iniciada_em", -1)],
+    )
+    return recuperar_mensagens(str(doc["_id"])) if doc else []
 
 
 def salvar_turno(

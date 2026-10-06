@@ -30,12 +30,12 @@ class PerfilResponse(PerfilRequest):
 
 
 class SessionResponse(BaseModel):
-    """Resposta das rotas de início e encerramento de sessão."""
+    """Resposta das rotas de criação e encerramento de sessão."""
     session_id: str
     resumo: str | None = None
 
 
 class SessionUserRequest(BaseModel):
-    """Identidade opcional enviada nas rotas de início/encerramento."""
+    """Identidade do usuário enviada nas operações de sessão."""
 
     user_id: str = Field(..., min_length=1, examples=["uuid-gerado-pelo-backend"])

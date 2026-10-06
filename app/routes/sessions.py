@@ -1,12 +1,45 @@
 """Rotas do ciclo de vida das sessões de conversa."""
 
-from fastapi import APIRouter
+import uuid
 
-from app.memory import encerrar_sessao, iniciar_sessao
+from fastapi import APIRouter, Query
+
+from app.memory import (
+    encerrar_sessao,
+    iniciar_sessao,
+    recuperar_mensagens_sessao,
+)
 from app.schemas import SessionResponse, SessionUserRequest
 
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
+
+
+@router.post("", response_model=SessionResponse)
+def criar(requisicao: SessionUserRequest) -> SessionResponse:
+    """Cria uma sessão e devolve o identificador que o cliente deve reutilizar."""
+    session_id = str(uuid.uuid4())
+    iniciar_sessao(session_id, user_id=requisicao.user_id)
+    return SessionResponse(session_id=session_id, resumo=None)
+
+
+@router.delete("/{session_id}", response_model=SessionResponse)
+def encerrar_rest(
+    session_id: str,
+    user_id: str = Query(..., min_length=1),
+) -> SessionResponse:
+    """Encerra uma sessão pelo endpoint REST definido no guia."""
+    resumo = encerrar_sessao(session_id, user_id=user_id)
+    return SessionResponse(session_id=session_id, resumo=resumo or None)
+
+
+@router.get("/{session_id}/historico")
+def historico(
+    session_id: str,
+    user_id: str = Query(..., min_length=1),
+) -> list[dict]:
+    """Devolve as mensagens da sessão pertencente ao usuário informado."""
+    return recuperar_mensagens_sessao(session_id, user_id)
 
 
 @router.post("/{session_id}/iniciar", response_model=SessionResponse)

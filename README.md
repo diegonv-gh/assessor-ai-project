@@ -14,6 +14,18 @@ O sistema conversa com o usuário, consulta e registra transações financeiras,
 - Resumos de sessões encerradas armazenados no MongoDB e indexados no Qdrant.
 - Interface web incluída em `frontend/`.
 
+## Organização do código
+
+- `app/main.py` configura o FastAPI e registra as rotas.
+- `app/agents.py` combina modelos, prompts e tools para os cinco agentes.
+- `app/graph.py` define o estado, os nós e as transições do LangGraph.
+- `app/tools/` contém as operações de finanças, agenda e FAQ; `app/tools/db.py`
+  centraliza a conexão PostgreSQL.
+- `app/config.py` carrega as configurações, e `app/llms.py` cria os modelos.
+
+O FAQ usa Qdrant. A ingestão do PDF é separada da tool de busca, que consulta a
+coleção já indexada.
+
 ## Serviços utilizados
 
 - PostgreSQL: dados financeiros.
@@ -53,9 +65,18 @@ Nunca substitua os placeholders por chaves reais no `README.md` ou em qualquer a
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install fastapi "uvicorn[standard]" pydantic python-dotenv psycopg2-binary pymongo qdrant-client langchain langgraph langchain-google-genai langchain-groq langchain-community langchain-text-splitters pypdf "mcp[cli]==2.2.0" "google-auth-oauthlib==1.5.0" tzdata
+pip install -r requirements.txt
 uvicorn app.main:app --reload
 ```
+
+### Rotas de sessão
+
+- `POST /sessions` recebe `{"user_id":"..."}` e devolve um `session_id` criado pela API.
+- `DELETE /sessions/{session_id}?user_id=...` encerra a sessão e devolve o resumo.
+- `GET /sessions/{session_id}/historico?user_id=...` recupera as mensagens da sessão.
+
+As rotas anteriores `/sessions/{session_id}/iniciar` e `/encerrar` continuam
+disponíveis para clientes existentes.
 
 ### Servidor MCP de finanças e agenda
 
