@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from app.routes import chat, identidade, perfil, sessions
+from app.routes import chat, identidade, perfil, sessions, monitor
 from app.config import validar_config, FRONTEND_DIR
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -26,6 +26,7 @@ app.include_router(chat.router)
 app.include_router(sessions.router)
 app.include_router(perfil.router)
 app.include_router(identidade.router)
+app.include_router(monitor.router)
 
 app.add_middleware(
     CORSMiddleware,

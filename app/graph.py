@@ -26,6 +26,7 @@ from app.guardrail import (
 from langchain_core.messages import RemoveMessage
 from langchain_core.runnables import RunnableConfig
 from app.memory import salvar_mensagem
+from app.observabilidade import abrir_turno, fechar_turno, status_do_estado
 
 # ==============================================================================
 # ESTADO
@@ -34,6 +35,7 @@ class Estado(MessagesState):
     agentes_chamados:   Annotated[list[str], operator.add]  # acumula entre nós
     rota: str                                  # decisão do roteador
     mapa_pii: dict #tokens -> valores originais gerados na anonimização
+    status_turno: str
 
 
 # ==============================================================================
@@ -515,7 +517,7 @@ def no_financeiro(estado: Estado, config: RunnableConfig) -> dict:
     return saida
 
 
-def no_orquestrador(estado: Estado) -> dict:
+def no_orquestrador(estado: Estado, config: RunnableConfig) -> dict:
     # O estado do LangGraph contém o histórico de vários turnos. Portanto,
     # procurar simplesmente o último AIMessage pode reutilizar a resposta de
     # uma pergunta anterior quando o especialista atual falhar. Delimitamos o
@@ -553,7 +555,7 @@ def no_orquestrador(estado: Estado) -> dict:
                     "content": f"ESPECIALISTA_JSON:\n{especialista_texto}",
                 }
             ]
-        })
+        }, config=config)
         resposta_orquestrada = normalizar_resposta_usuario(_texto_mensagem(saida["messages"][-1]))
     if not resposta_orquestrada:
         raise RuntimeError("O orquestrador não produziu uma resposta textual.")
@@ -593,6 +595,7 @@ def no_guardrail_entrada(estado: Estado, config: RunnableConfig) -> dict:
         return {
             "agentes_chamados": ["guardrail_entrada"],
             "rota": "fim",
+            "status_turno": "bloqueado",
             "messages": [
                 {
                     "role": "assistant",
@@ -616,6 +619,7 @@ def no_guardrail_entrada(estado: Estado, config: RunnableConfig) -> dict:
     return {
         "agentes_chamados": ["guardrail_entrada"],
         "rota": "roteador",
+        "status_turno": "ok",
         "mapa_pii": mapa_pii,
         "messages": [
             RemoveMessage(id=puser.id),
@@ -703,32 +707,49 @@ def executar_fluxo_assessor_detalhado(
         "rota": "",
         "mapa_pii": {},
         "session_id": session_id,
+        "status_turno": "ok",
     }
-    
-    estado_final = fluxo_agentes.invoke(
-        estado_inicial,
-        config={
-            "configurable": {
-                "thread_id": session_id,
-                "user_id": user_id,
-            }
-        },
-    )
 
-    resposta_bruta = _texto_mensagem(estado_final["messages"][-1])
-    resposta = _formatar_resposta_especialista(resposta_bruta) or normalizar_resposta_usuario(resposta_bruta)
-    # A entrada já foi persistida de forma anonimizada no guardrail de entrada.
-    salvar_mensagem(
+    turno_id = abrir_turno()
+    status = "erro"
+    rota = ""
+    try:
+        estado_final = fluxo_agentes.invoke(
+            estado_inicial,
+            config={
+                "configurable": {
+                    "thread_id": session_id,
+                    "user_id": user_id,
+                }
+            },
+        )
+
+        resposta_bruta = _texto_mensagem(estado_final["messages"][-1])
+        resposta = _formatar_resposta_especialista(resposta_bruta) or normalizar_resposta_usuario(resposta_bruta)
+        # A entrada já foi persistida de forma anonimizada no guardrail de entrada.
+        salvar_mensagem(
+            session_id,
+            "assistant",
+            resposta,
+            user_id=user_id,
+        )
+
+        status = status_do_estado(estado_final)
+        rota = estado_final.get("rota") or ""
+        return resposta, estado_final["agentes_chamados"]
+    finally:
+        fechar_turno(turno_id, session_id=session_id, rota=rota, status=status)
+
+
+def executar_fluxo_assessor(
+    pergunta_usuario: str,
+    session_id: str,
+    user_id: str = "usuario_teste",
+) -> str:
+    """Mantém a API antiga, devolvendo somente o texto da resposta."""
+    resposta, _ = executar_fluxo_assessor_detalhado(
+        pergunta_usuario,
         session_id,
-        "assistant",
-        resposta,
         user_id=user_id,
     )
-
-    return resposta, estado_final.get("agentes_chamados", [])
-
-
-def executar_fluxo_assessor(pergunta_usuario: str, session_id: str) -> str:
-    """Mantém a API antiga, devolvendo somente o texto da resposta."""
-    resposta, _ = executar_fluxo_assessor_detalhado(pergunta_usuario, session_id)
     return resposta

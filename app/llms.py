@@ -5,7 +5,7 @@ from langchain_groq import ChatGroq
 from app.config import GROQ_API_KEY, GEMINI_API_KEY
 
 GROQ_API = "openai/gpt-oss-120b"
-GROQ_FAST_API = "llama-3.3-70b-versatile"
+GROQ_FAST_API = "openai/gpt-oss-20b"
 
 
 llm_gemini = ChatGoogleGenerativeAI(

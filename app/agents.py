@@ -7,7 +7,7 @@ from langchain.agents.middleware import dynamic_prompt, wrap_tool_call
 from langchain_core.messages import ToolMessage
 from langgraph.checkpoint.memory import MemorySaver
 
-from app.llms import llm_especialista, llm_rapido
+from app.llms import llm_especialista, llm_gemini, llm_rapido
 from app.perfil import TOOLS_PERFIL
 from app.prompts import (
     FAQ_PROMPT_COMPLETO,
@@ -147,7 +147,10 @@ def _ordenar_gravacoes_agenda(request, handler):
 router_memory = MemorySaver()
 
 router_app = create_agent(
-    model=llm_rapido,
+    # O roteador usa um protocolo textual (ROUTE=...) e só possui tools de
+    # memória. O fallback evita que uma chamada de tool inválida do modelo
+    # rápido (por exemplo, tentar chamar "agenda") derrube o turno inteiro.
+    model=llm_rapido.with_fallbacks([llm_gemini]),
     tools=TOOLS_MEMORIA,
     system_prompt=ROUTER_PROMPT_COMPLETO,
     checkpointer=router_memory,
