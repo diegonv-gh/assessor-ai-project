@@ -1,9 +1,8 @@
 import json
+import logging
 import operator
 import re
-from datetime import datetime, timedelta
 from typing import Annotated
-from zoneinfo import ZoneInfo
 from langgraph.graph import StateGraph, MessagesState, END
 from langgraph.checkpoint.memory import MemorySaver
 from app.agents import (
@@ -15,7 +14,9 @@ from app.agents import (
     orquestrador_app,
     router_model,
 )
-from app.tools.financeiro import add_transaction, saldo_total
+from app.tools.financeiro import add_transaction, update_transaction, saldo_total
+from app.tools.agenda import add_event
+from app.tools.calendario_google import add_google_event
 from app.prompts import ROUTER_PROMPT_COMPLETO
 from app.guardrail import (
     anonimizar_entrada,
@@ -30,6 +31,8 @@ from app.memory import salvar_mensagem
 from app.observabilidade import abrir_turno, fechar_turno, status_do_estado
 from app.juiz import no_juiz
 
+logger = logging.getLogger(__name__)
+
 # ==============================================================================
 # ESTADO
 # ==============================================================================
@@ -39,6 +42,8 @@ class Estado(MessagesState):
     mapa_pii: dict #tokens -> valores originais gerados na anonimização
     status_turno: str
     evidencia_turno: str
+    pending_writes: list[dict]
+    juiz_aprovou: bool
 
 
 # ==============================================================================
@@ -50,19 +55,35 @@ def no_roteador(estado: Estado, config: RunnableConfig) -> dict:
         config=config,
     )
     texto = _texto_mensagem(saida)
+    rota = None
+    for linha in texto.splitlines():
+        correspondencia = re.fullmatch(r"\s*ROUTE\s*=\s*(financeiro|agenda|faq)\s*", linha, re.IGNORECASE)
+        if correspondencia:
+            rota = correspondencia.group(1).casefold()
+            break
 
-    if "ROUTE=" not in texto:
+    if rota is None:
+        pergunta = ""
+        for mensagem in reversed(estado["messages"]):
+            tipo = mensagem.get("role", "") if isinstance(mensagem, dict) else getattr(mensagem, "type", "")
+            if tipo in ("human", "user"):
+                pergunta = _texto_mensagem(mensagem)
+                break
+        rota = _rota_especialista_por_intencao(pergunta)
+        if rota:
+            logger.warning("Roteador sem protocolo válido; encaminhando por intenção reconhecível para %s", rota)
+            return {"agentes_chamados": ["roteador"], "rota": rota}
+
+        # Mensagem vazia ou protocolo malformado nunca deve encerrar o turno
+        # com texto vazio nem expor instruções internas ao usuário.
+        resposta = texto.strip()
+        if not resposta or "ROUTE=" in resposta:
+            resposta = "Não consegui encaminhar sua solicitação agora. Pode reformulá-la?"
         return {
             "agentes_chamados": ["roteador"],
-            "rota":             "fim",
-            "messages":         [{"role": "assistant", "content": texto}],
+            "rota": "fim",
+            "messages": [{"role": "assistant", "content": resposta}],
         }
-
-    rota = "fim"
-    for linha in texto.splitlines():
-        if linha.startswith("ROUTE="):
-            rota = linha.split("=", 1)[1].strip()
-            break
 
     return {
         "agentes_chamados": ["roteador"],
@@ -114,6 +135,27 @@ def _parece_operacao_financeira(texto: str) -> bool:
     ))
 
 
+def _rota_especialista_por_intencao(texto: str) -> str | None:
+    """Fallback restrito para recuperar o encaminhamento quando o protocolo falhar."""
+    texto = texto.casefold()
+    termos_agenda = (
+        "agenda", "evento", "eventos", "compromisso", "compromissos",
+        "reunião", "reuniao", "lembrete", "lembretes", "calendário", "calendario",
+    )
+    if any(termo in texto for termo in termos_agenda):
+        return "agenda"
+
+    termos_financeiros = (
+        "perfil", "renda", "objetivo", "meta financeira", "investimento",
+        "tolerância a risco", "tolerancia a risco", "planejamento financeiro",
+        "conversa anterior", "conversas anteriores", "histórico", "historico",
+        "memória", "memoria",
+    )
+    if _parece_operacao_financeira(texto) or any(termo in texto for termo in termos_financeiros):
+        return "financeiro"
+    return None
+
+
 def _eh_pedido_de_insercao(texto: str) -> bool:
     texto = texto.casefold()
     if any(palavra in texto for palavra in ("quanto", "qual", "mostre", "listar", "extrato")):
@@ -123,80 +165,6 @@ def _eh_pedido_de_insercao(texto: str) -> bool:
         "registre", "registrei", "lançar", "lancar", "adicionar", "adicionei",
         "anotei", "cadastrei", "lance",
     ))
-
-
-def _valor_insercao(texto: str) -> float | None:
-    encontrados = re.findall(
-        r"(?:r\$\s*|\b)(\d{1,3}(?:\.\d{3})*(?:,\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:reais?|rs)\b",
-        texto.casefold(),
-    )
-    if not encontrados:
-        encontrados = re.findall(r"(?<![/\d])\d+(?:[.,]\d{1,2})?(?![/\d])", texto)
-    for bruto in encontrados:
-        numero = bruto.replace(".", "").replace(",", ".") if "," in bruto else bruto
-        try:
-            valor = float(numero)
-        except ValueError:
-            continue
-        if valor > 0:
-            return valor
-    return None
-
-
-def _data_insercao(texto: str) -> str | None:
-    agora = datetime.now(ZoneInfo("America/Sao_Paulo"))
-    texto_lower = texto.casefold()
-    if "anteontem" in texto_lower:
-        dia = agora - timedelta(days=2)
-    elif "ontem" in texto_lower:
-        dia = agora - timedelta(days=1)
-    else:
-        encontrados = re.search(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b", texto)
-        if not encontrados:
-            return None
-        try:
-            return datetime.strptime(encontrados.group(0), "%d/%m/%Y").date().isoformat()
-        except ValueError:
-            return None
-    return dia.date().isoformat()
-
-
-def _fallback_insercao(texto: str) -> tuple[dict | None, str]:
-    valor = _valor_insercao(texto)
-    if valor is None:
-        return None, ""
-    texto_lower = texto.casefold()
-    tipo = "INCOME" if any(palavra in texto_lower for palavra in ("ganhei", "recebi", "salário", "salario", "receita")) else "EXPENSES"
-    data = _data_insercao(texto)
-    ocorreu_em = f"{data}T12:00:00-03:00" if data else None
-    resultado = add_transaction.invoke({
-        "amount": valor,
-        "source_text": texto,
-        "occurred_at": ocorreu_em,
-        "type_name": tipo,
-        "description": texto,
-    })
-    if resultado.get("status") == "ok" and resultado.get("id") is not None:
-        valor_registrado = resultado.get("amount", valor)
-        conversao = resultado.get("conversion")
-        detalhe_conversao = (
-            f" (US$ {conversao['amount_original']:,.2f} × R$ {conversao['exchange_rate']:.2f}/US$)"
-            if conversao else ""
-        )
-        especialista = {
-            "dominio": "financeiro",
-            "intencao": "inserir",
-            "resposta": f"Registrei R$ {valor_registrado:,.2f}{detalhe_conversao} no banco de dados.".replace(",", "X").replace(".", ",").replace("X", "."),
-            "recomendacao": "",
-            "escrita": {"operacao": "adicionar", "id": resultado.get("id")},
-        }
-        return especialista, json.dumps(resultado, ensure_ascii=False)
-    return {
-        "dominio": "financeiro",
-        "intencao": "inserir",
-        "resposta": "Não consegui confirmar a gravação. Verifique o extrato antes de tentar novamente.",
-        "recomendacao": "",
-    }, json.dumps(resultado, ensure_ascii=False)
 
 
 def _evidencias_tools(mensagens) -> str:
@@ -209,11 +177,13 @@ def _evidencias_tools(mensagens) -> str:
             for chamada in chamadas or []:
                 nome = chamada.get("name", "tool")
                 argumentos = chamada.get("args", {})
-                evidencias.append(f"[chamada {nome}]\n{json.dumps(argumentos, ensure_ascii=False)}")
+                if nome not in {"add_transaction", "update_transaction", "add_event"}:
+                    evidencias.append(f"[chamada {nome}]\n{json.dumps(argumentos, ensure_ascii=False)}")
         elif tipo == "tool":
             nome = mensagem.get("name", "tool") if isinstance(mensagem, dict) else getattr(mensagem, "name", "tool")
             conteudo = mensagem.get("content", "") if isinstance(mensagem, dict) else getattr(mensagem, "content", "")
-            evidencias.append(f"[{nome}]\n{_texto_mensagem(mensagem) or conteudo}")
+            if nome not in {"add_transaction", "update_transaction", "add_event"}:
+                evidencias.append(f"[{nome}]\n{_texto_mensagem(mensagem) or conteudo}")
     return "\n\n".join(evidencias)
 
 
@@ -267,11 +237,40 @@ def _ultimo_resultado_tool(mensagens, nome_tool: str) -> dict | None:
     return resultados[-1] if resultados else None
 
 
+def _propostas_pendentes(mensagens) -> list[dict]:
+    propostas = []
+    nomes = {"add_transaction", "update_transaction", "add_event"}
+    for mensagem in mensagens:
+        nome = mensagem.get("name", "") if isinstance(mensagem, dict) else getattr(mensagem, "name", "")
+        if nome in nomes:
+            for resultado in _resultados_tool([mensagem], nome):
+                if resultado.get("status") == "pending" and resultado.get("operation") == nome:
+                    propostas.append(resultado)
+    return propostas
+
+
+def _resposta_propostas(dominio: str, mensagens) -> dict | None:
+    propostas = _propostas_pendentes(mensagens)
+    if not propostas:
+        return None
+    return {
+        "agentes_chamados": [dominio],
+        "pending_writes": propostas,
+        "evidencia_turno": _evidencias_tools(mensagens),
+        "messages": [{"role": "assistant", "content": json.dumps({
+            "dominio": dominio, "intencao": "criar",
+            "resposta": "Preparei a operação para avaliação; ainda não foi registrada.",
+            "recomendacao": "",
+        }, ensure_ascii=False)}],
+    }
+
+
 def no_agenda(estado: Estado, config: RunnableConfig) -> dict:
     """Executa agenda e só confirma consultas/escritas verificadas nas tools."""
     try:
         saida = agenda_app.invoke({"messages": list(estado["messages"])}, config=config)
     except Exception:
+        logger.exception("Falha no especialista de agenda")
         return {
             "agentes_chamados": ["agenda"],
             "messages": [{"role": "assistant", "content": json.dumps({
@@ -285,79 +284,9 @@ def no_agenda(estado: Estado, config: RunnableConfig) -> dict:
     mensagens = saida.get("messages", [])
     indice_usuario = _indice_ultima_mensagem_usuario(mensagens)
     mensagens_turno = mensagens[indice_usuario + 1:] if indice_usuario >= 0 else mensagens
-    resultados_locais = _resultados_tool(mensagens_turno, "add_event")
-    resultados_google = _resultados_tool(mensagens_turno, "add_google_event")
-    evento_local = next(
-        (item for item in reversed(resultados_locais) if item.get("status") == "ok" and item.get("id") is not None),
-        None,
-    )
-    evento_google = next(
-        (item for item in resultados_google if item.get("status") == "ok" and item.get("id")),
-        None,
-    )
-
-    if evento_local is not None:
-        google_ok = evento_google is not None
-        nome = evento_local.get("title", "o compromisso")
-        if google_ok:
-            resposta = f"Registrei '{nome}' na agenda local e no Google Calendar."
-            recomendacao = ""
-        else:
-            resposta = f"Registrei '{nome}' na agenda local, mas não consegui confirmar a criação no Google Calendar."
-            recomendacao = "Confira o calendário; se o evento não estiver lá, adicione-o manualmente. Não repeti a criação."
-        dados = {
-            "dominio": "agenda",
-            "intencao": "criar",
-            "resposta": resposta,
-            "recomendacao": recomendacao,
-            "escrita": {
-                "operacao": "adicionar",
-                "id": evento_local["id"],
-                "google": "ok" if google_ok else "falhou",
-            },
-        }
-        return {
-            "agentes_chamados": ["agenda"],
-            "messages": [{"role": "assistant", "content": json.dumps(dados, ensure_ascii=False)}],
-        }
-
-    ultimo_local = resultados_locais[-1] if resultados_locais else None
-    if ultimo_local and ultimo_local.get("status") == "error":
-        codigo = ultimo_local.get("code")
-        eventos = ultimo_local.get("events", [])
-        if codigo == "event_conflict":
-            conflito = eventos[0] if eventos else {}
-            titulo = conflito.get("title", "um compromisso existente")
-            horario = conflito.get("start_time", "")
-            if conflito.get("end_time"):
-                horario += f"–{conflito['end_time']}"
-            resposta = f"Não registrei o evento porque o horário se sobrepõe a '{titulo}' {horario}."
-            esclarecer = "Qual outro horário você prefere?"
-        elif codigo == "unknown_existing_duration":
-            resposta = "Não registrei o evento porque há um compromisso sem horário final e não consigo confirmar se existe sobreposição."
-            esclarecer = "Confira o término do compromisso existente ou escolha outro horário."
-        elif codigo == "invalid_datetime":
-            resposta = "Ainda não registrei o compromisso porque preciso de horários válidos com fuso horário."
-            esclarecer = "Informe a data, o horário inicial e o horário final."
-        elif codigo == "invalid_time_range":
-            resposta = "Ainda não registrei o compromisso porque o horário final precisa ser posterior ao inicial."
-            esclarecer = "Qual é o horário final correto?"
-        else:
-            resposta = "Não consegui registrar o compromisso na agenda local; não criei um evento no Google."
-            esclarecer = None
-        dados = {
-            "dominio": "agenda",
-            "intencao": "criar",
-            "resposta": resposta,
-            "recomendacao": "",
-        }
-        if esclarecer:
-            dados["esclarecer"] = esclarecer
-        return {
-            "agentes_chamados": ["agenda"],
-            "messages": [{"role": "assistant", "content": json.dumps(dados, ensure_ascii=False)}],
-        }
-
+    proposta = _resposta_propostas("agenda", mensagens_turno)
+    if proposta:
+        return proposta
     resultado_consulta = _ultimo_resultado_tool(mensagens_turno, "query_events")
     if resultado_consulta and resultado_consulta.get("status") == "error":
         dados = {
@@ -387,7 +316,7 @@ def no_agenda(estado: Estado, config: RunnableConfig) -> dict:
         if dados_modelo.get("esclarecer"):
             dados_modelo.pop("escrita", None)
             dados_modelo["resposta"] = "Ainda não registrei o compromisso."
-        elif evento_local is None:
+        else:
             dados_modelo = {
                 "dominio": "agenda",
                 "intencao": "criar",
@@ -433,6 +362,7 @@ def no_financeiro(estado: Estado, config: RunnableConfig) -> dict:
             config=config,
         )
     except Exception:
+        logger.exception("Falha no especialista financeiro")
         return {
             "agentes_chamados": ["financeiro"],
             "evidencia_turno": "",
@@ -449,6 +379,9 @@ def no_financeiro(estado: Estado, config: RunnableConfig) -> dict:
     mensagens = saida.get("messages", [])
     indice_usuario = _indice_ultima_mensagem_usuario(mensagens)
     mensagens_do_turno = mensagens[indice_usuario + 1:] if indice_usuario >= 0 else mensagens
+    proposta = _resposta_propostas("financeiro", mensagens_do_turno)
+    if proposta:
+        return proposta
     evidencia_turno = _evidencias_tools(mensagens_do_turno)
     chamou_tool = any(
         (mensagem.get("role") if isinstance(mensagem, dict) else getattr(mensagem, "type", "")) == "tool"
@@ -511,52 +444,17 @@ def no_financeiro(estado: Estado, config: RunnableConfig) -> dict:
             "messages": [{"role": "assistant", "content": json.dumps(especialista, ensure_ascii=False)}],
         }
 
-    # Para inserções simples, se o modelo não emitiu a chamada da tool,
-    # extraímos somente os dados inequívocos e registramos de forma explícita.
-    # Se faltar valor ou a intenção não for clara, não fazemos nenhuma escrita.
     if _eh_pedido_de_insercao(pergunta) or chamou_add_transaction:
-        resultado_adicao = _ultimo_resultado_tool(mensagens_do_turno, "add_transaction")
-        if resultado_adicao and resultado_adicao.get("status") == "ok" and resultado_adicao.get("id") is not None:
-            conversao = resultado_adicao.get("conversion")
-            if conversao:
-                valor_formatado = f"{resultado_adicao['amount']:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-                dolar_formatado = f"{conversao['amount_original']:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-                resposta_registro = (
-                    f"Registrei R$ {valor_formatado}, convertidos de US$ {dolar_formatado} "
-                    "pela taxa fixa de R$ 5,40 por dólar."
-                )
-            else:
-                resposta_registro = "A transação foi registrada no banco de dados."
-            especialista = {
-                "dominio": "financeiro",
-                "intencao": "inserir",
-                "resposta": resposta_registro,
-                "recomendacao": "",
-                "escrita": {"operacao": "adicionar", "id": resultado_adicao.get("id")},
-            }
-        elif not chamou_add_transaction:
-            especialista, evidencia_fallback = _fallback_insercao(pergunta)
-            evidencia_turno = evidencia_fallback or evidencia_turno
+        dados = _extrair_json_especialista(texto_financeiro)
+        if not dados or not dados.get("esclarecer"):
+            dados = {"dominio": "financeiro", "intencao": "inserir",
+                     "resposta": "Não consegui preparar a transação; nenhum registro foi feito.",
+                     "recomendacao": "Tente novamente."}
         else:
-            especialista = {
-                "dominio": "financeiro",
-                "intencao": "inserir",
-                "resposta": "Não consegui confirmar a gravação. Verifique o extrato antes de tentar novamente.",
-                "recomendacao": "",
-            }
-        if especialista is None:
-            especialista = {
-                "dominio": "financeiro",
-                "intencao": "inserir",
-                "resposta": "Qual foi o valor e a moeda da transação?",
-                "recomendacao": "",
-                "esclarecer": "Informe o valor e a moeda para eu registrar.",
-            }
-        return {
-            "agentes_chamados": ["financeiro"],
-            "evidencia_turno": evidencia_turno,
-            "messages": [{"role": "assistant", "content": json.dumps(especialista, ensure_ascii=False)}],
-        }
+            dados.pop("escrita", None)
+            dados["resposta"] = "Ainda não registrei a transação."
+        return {"agentes_chamados": ["financeiro"], "evidencia_turno": evidencia_turno,
+                "messages": [{"role": "assistant", "content": json.dumps(dados, ensure_ascii=False)}]}
 
     # Uma resposta do modelo que afirma inserção sem sucesso confirmado da tool
     # não pode ser apresentada como gravação concluída.
@@ -642,6 +540,61 @@ def no_orquestrador(estado: Estado, config: RunnableConfig) -> dict:
     }
 
 
+def no_efetivar_escritas(estado: Estado) -> dict:
+    propostas = estado.get("pending_writes") or []
+    if not propostas:
+        return {"pending_writes": []}
+    if not estado.get("juiz_aprovou"):
+        resposta = _texto_mensagem(estado["messages"][-1])
+        return {"pending_writes": [], "messages": [{"role": "assistant", "content": resposta + " Nenhuma proposta foi gravada."}]}
+
+    executores = {"add_transaction": add_transaction, "update_transaction": update_transaction, "add_event": add_event}
+    respostas = []
+    resultados = []
+    for proposta in propostas:
+        nome = proposta.get("operation")
+        executor = executores.get(nome)
+        try:
+            resultado = executor.invoke(proposta["arguments"]) if executor else {"status": "error"}
+        except Exception:
+            logger.exception("Falha ao executar a operação aprovada %s", nome)
+            resultado = {"status": "error", "code": "execution_error"}
+        if not isinstance(resultado, dict):
+            resultado = {"status": "error", "code": "invalid_result"}
+        resultados.append({"operation": nome, "result": resultado})
+        if resultado.get("status") != "ok" or resultado.get("id") is None:
+            mensagem = resultado.get("message") or "Não consegui confirmar a gravação. Confira os registros antes de tentar novamente."
+            respostas.append(mensagem)
+            continue
+        if nome == "add_event":
+            try:
+                google = add_google_event.invoke({"title": resultado["title"], "start_time": resultado["start_time"],
+                    "end_time": resultado["end_time"], "location": resultado.get("location"),
+                    "description": resultado.get("notes")})
+            except Exception:
+                logger.exception("Falha ao sincronizar o evento aprovado com o Google")
+                google = {"status": "error"}
+            resultados.append({"operation": "add_google_event", "result": google})
+            if isinstance(google, dict) and google.get("status") == "ok" and google.get("id"):
+                respostas.append(f"Registrei '{resultado['title']}' na agenda local e no Google Calendar.")
+            else:
+                respostas.append(f"Registrei '{resultado['title']}' na agenda local, mas não confirmei a criação no Google Calendar. Confira o calendário antes de tentar novamente.")
+        elif nome == "add_transaction":
+            valor = f"{resultado['amount']:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+            conversao = resultado.get("conversion")
+            detalhe = ""
+            if conversao:
+                original = f"{conversao['amount_original']:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                detalhe = f", convertidos de US$ {original} pela taxa fixa de R$ 5,40 por dólar"
+            respostas.append(f"Registrei R$ {valor}{detalhe}.")
+        else:
+            respostas.append(f"Atualizei a transação de ID {resultado['id']}.")
+    return {"messages": [{"role": "assistant", "content": " ".join(respostas)}],
+            "pending_writes": [], "juiz_aprovou": False,
+            "evidencia_turno": estado.get("evidencia_turno", "") + "\n[resultados das gravações]\n" + json.dumps(resultados, ensure_ascii=False),
+            "agentes_chamados": ["persistencia_pos_juiz"]}
+
+
 # ==============================================================================
 # FUNÇÃO DE DECISÃO
 # ==============================================================================
@@ -714,7 +667,8 @@ def no_guardrail_saida(estado: Estado) -> dict:
 
     if resultado["bloqueado"]:
         return {
-            "messages":         [{"role": "assistant", "content": resultado["mensagem"]}],
+            "messages": [{"role": "assistant", "content": resultado["mensagem"]}],
+            "pending_writes": [],
         }
 
     mensagem_atual = estado["messages"][-1]
@@ -739,6 +693,7 @@ grafo.add_node("faq",          faq_app)
 grafo.add_node("orquestrador", no_orquestrador)
 grafo.add_node("guardrail_saida", no_guardrail_saida)
 grafo.add_node("juiz", no_juiz)
+grafo.add_node("efetivar_escritas", no_efetivar_escritas)
 
 grafo.set_entry_point("guardrail_entrada")
 
@@ -767,7 +722,8 @@ grafo.add_edge("agenda",          "orquestrador")
 grafo.add_edge("orquestrador",    "guardrail_saida")
 grafo.add_edge("guardrail_saida", "juiz")
 grafo.add_edge("faq",             "juiz")
-grafo.add_edge("juiz",            END)   # FAQ bypassa o orquestrador
+grafo.add_edge("juiz", "efetivar_escritas")
+grafo.add_edge("efetivar_escritas", END)
 
 # Memória centralizada no grafo — persiste o Estado inteiro entre turns
 memory = MemorySaver()
@@ -789,6 +745,8 @@ def executar_fluxo_assessor_detalhado(
         "session_id": session_id,
         "status_turno": "ok",
         "evidencia_turno": "",
+        "pending_writes": [],
+        "juiz_aprovou": False,
     }
 
     turno_id = abrir_turno()

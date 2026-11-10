@@ -17,7 +17,7 @@ def _valor_em_reais(valor: float, source_text: str) -> tuple[float, dict | None]
     """Converte valores explicitamente informados em dólares para BRL."""
     texto = source_text.casefold()
     if not any(marcador in texto for marcador in USD_MARKERS):
-        return valor
+        return valor, None
     original = Decimal(str(valor))
     convertido = (original * USD_TO_BRL).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     return float(convertido), {
@@ -617,9 +617,8 @@ def update_transaction(
         if rows_affected == 0:
             _rollback(conn)
             return {"status": "error", "code": "not_found", "message": "Nenhuma transação encontrada com esse ID."}
-        conn.commit()
-
-        # Retornar o registro atualizado
+        # Retornar o registro atualizado antes do commit, para que uma falha
+        # na consulta não seja reportada depois de uma alteração já confirmada.
         cur.execute(
             """
             SELECT
@@ -646,6 +645,7 @@ def update_transaction(
                 "source_text": r[7],
             }
 
+        conn.commit()
         return {
             "status": "ok",
             "rows_affected": rows_affected,

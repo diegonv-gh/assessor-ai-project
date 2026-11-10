@@ -229,7 +229,7 @@ pertencem ao agente de agenda.
 - Para registrar uma transação, use add_transaction depois de obter os dados
   necessários. Para corrigir uma transação existente, use update_transaction.
 - Só informe que uma escrita foi concluída quando a tool retornar status "ok".
-  Em qualquer outro status, explique que a operação não foi confirmada e não
+  Um retorno status "pending" indica somente proposta para avaliação do juiz; não afirme que houve gravação. Em qualquer outro status, explique que a operação não foi confirmada e não
   invente ID, valor ou registro.
 - Em pedidos de atualização ou exclusão, preserve o registro correto. Quando
   não houver ID, solicite os dados mínimos de identificação e não escolha um
@@ -276,7 +276,9 @@ Financeiro: {"dominio":"financeiro","intencao":"consultar","resposta":"Você gas
 FINANCEIRO_SHOT_2 = """
 Roteador: ROUTE=financeiro
 PERGUNTA_ORIGINAL=[pedido para registrar gasto com valor e forma de pagamento]
-Financeiro: {"dominio":"financeiro","intencao":"inserir","resposta":"Lancei R$ [valor] em '[categoria]' [data] ([pagamento]).","recomendacao":"[pergunta ou observação opcional]","escrita":{"operacao":"adicionar","id":[id gerado]}}"""
+Financeiro: add_transaction(amount=[valor], source_text="[pedido do usuário]")
+Tool: {"status":"pending","operation":"add_transaction"}
+Financeiro: {"dominio":"financeiro","intencao":"inserir","resposta":"Preparei a transação para avaliação; ainda não foi registrada.","recomendacao":""}"""
 #Exemplo 3 — Dado ausente → esclarecer:
 FINANCEIRO_SHOT_3 = """
 Roteador: ROUTE=financeiro
@@ -339,8 +341,8 @@ Compromissos, eventos, lembretes, tarefas, disponibilidade e conflitos de agenda
 - Use datas locais de `America/Sao_Paulo`. Envie horários ISO 8601 com offset, como `2026-10-05T14:00:00-03:00`.
 - Antes de criar, chame `query_events` para verificar o horário. Se houver sobreposição, explique qual evento conflita e peça outro horário; não grave.
 - Se a consulta falhar ou um evento existente não tiver fim registrado e impedir a confirmação, não afirme que o horário está livre.
-- Para criar, chame primeiro `add_event` no PostgreSQL. Só após `status: "ok"` e um `id` real, chame `add_google_event` com o mesmo título, início, fim e local.
-- Se `add_event` falhar, não chame o Google. Se o PostgreSQL salvar e o Google falhar, diga que o evento ficou somente na agenda local.
+- Para criar, chame `add_event` para preparar a proposta; a gravação local e a sincronização Google ocorrem somente após aprovação do juiz.
+- Um resultado `pending` é apenas uma proposta, não uma confirmação de gravação.
 - Atualização e cancelamento ainda não estão disponíveis. Explique a limitação e não alegue que executou essas ações.
 
 
@@ -382,17 +384,15 @@ PERGUNTA_ORIGINAL=o que tenho na agenda amanhã?
 Agenda: query_events(date_local="[amanhã em YYYY-MM-DD]")
 Tool: {"status":"ok","count":1,"results":[{"title":"Dentista","start_time":"[ISO 8601]","end_time":"[ISO 8601]"}]}
 Agenda: {"dominio":"agenda","intencao":"consultar","resposta":"Você tem dentista amanhã [horário retornado pela tool].","recomendacao":""}"""
-# Exemplo 2 — Criação confirmada nos dois destinos:
+# Exemplo 2 — proposta de criação:
 AGENDA_SHOT_2 = """
 Roteador: ROUTE=agenda
-PERGUNTA_ORIGINAL=marca reunião com Marcos em [data], das 15h às 16h, na sala 3
+PERGUNTA_ORIGINAL=marca reunião em [data], das 15h às 16h
 Agenda: query_events(date_local="[YYYY-MM-DD]")
 Tool: {"status":"ok","count":0,"results":[]}
-Agenda: add_event(title="Reunião com Marcos", source_text="[pedido original]", start_time="[YYYY-MM-DD]T15:00:00-03:00", end_time="[YYYY-MM-DD]T16:00:00-03:00", location="sala 3")
-Tool: {"status":"ok","id":123,"title":"Reunião com Marcos","start_time":"[início retornado]","end_time":"[fim retornado]"}
-Agenda: add_google_event(title="Reunião com Marcos", start_time="[mesmo início]", end_time="[mesmo fim]", location="sala 3")
-Tool: {"status":"ok","id":"[id Google]"}
-Agenda: {"dominio":"agenda","intencao":"criar","resposta":"Registrei a reunião com Marcos na agenda local e no Google Calendar.","recomendacao":""}"""
+Agenda: add_event(title="Reunião", source_text="[pedido original]", start_time="[início ISO]", end_time="[fim ISO]")
+Tool: {"status":"pending","operation":"add_event"}
+Agenda: {"dominio":"agenda","intencao":"criar","resposta":"Preparei o compromisso para avaliação; ainda não foi registrado.","recomendacao":""}"""
 # Exemplo 3 — Conflito bloqueia gravação:
 AGENDA_SHOT_3 = """
 Roteador: ROUTE=agenda
@@ -415,18 +415,6 @@ Tool: [09/08/2026] O usuário agendou uma viagem para Salvador em dezembro.
 Agenda: (usa o achado apenas como contexto; confirma no banco com query_events)
 Agenda: {"dominio":"agenda","intencao":"consultar","resposta":"[resposta baseada no resultado atual de query_events]","recomendacao":""}"""
 
-# Exemplo 6 — gravação local confirmada e Google sem confirmação.
-AGENDA_SHOT_6 = """
-Roteador: ROUTE=agenda
-PERGUNTA_ORIGINAL=marca reunião em [data], das 15h às 16h
-Agenda: query_events(date_local="[YYYY-MM-DD]")
-Tool: {"status":"ok","count":0,"results":[]}
-Agenda: add_event(title="Reunião", source_text="[pedido original]", start_time="[início ISO]", end_time="[fim ISO]")
-Tool: {"status":"ok","id":123,"title":"Reunião"}
-Agenda: add_google_event(title="Reunião", start_time="[mesmo início]", end_time="[mesmo fim]")
-Tool: {"status":"error","code":"google_auth_required"}
-Agenda: {"dominio":"agenda","intencao":"criar","resposta":"Registrei a reunião na agenda local, mas o Google Calendar não confirmou a criação.","recomendacao":"Confira a autorização Google; não repita automaticamente a criação."}"""
-
 AGENDA_SHOTS_CUT = (
     "FIM DOS EXEMPLOS. "
     "Os exemplos terminam aqui; trate as mensagens fornecidas no turno como o contexto verdadeiro."
@@ -440,7 +428,6 @@ AGENDA_PROMPT_COMPLETO = (
     AGENDA_SHOT_3      + "\n\n" +
     AGENDA_SHOT_4      + "\n\n" +
     AGENDA_SHOT_5      + "\n\n" +
-    AGENDA_SHOT_6      + "\n\n" +
     AGENDA_SHOTS_CUT
 )
 
